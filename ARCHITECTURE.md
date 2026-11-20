@@ -1,4 +1,4 @@
-# TRADING_SYSTEM_SPEC.md — спецификация торговой платформы
+# ARCHITECTURE.md — спецификация торговой платформы
 
 > **Версия:** 1.0 · **Дата:** 2026-11-20 · **Статус:** Draft for implementation
 > **Связанный документ:** `ML_LLM_FUSION_SPEC.md` — ML-модели, LLM-провайдеры, правила слияния, защита от галлюцинаций. В этом документе гибридный контур описан **только как интерфейсный контракт**.
@@ -175,7 +175,7 @@ class Settings(BaseSettings):
                                       extra="forbid")
     trading_mode: TradingMode = TradingMode.PAPER
     max_allowed_mode: TradingMode = TradingMode.PAPER
-    db_path: str = "data/tradebot.sqlite3"
+    db_path: str = "data/janus.db"
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT"])
     risk: RiskLimits = RiskLimits()
     fusion: FusionSettings = FusionSettings()
@@ -660,20 +660,28 @@ CREATE INDEX ix_fused_created ON fused_signals(created_at);
 
 -- Схема decision_audit — VERSIONING.md §6.1 (единственный источник истины)
 CREATE TABLE decision_audit (
-    id                  INTEGER PRIMARY KEY,
-    signal_id           INTEGER NOT NULL REFERENCES signals(id),
-    fused_signal_id     INTEGER NOT NULL REFERENCES fused_signals(id),
-    app_version         TEXT NOT NULL CHECK (length(app_version) > 0
-                                             AND app_version NOT LIKE '%+unknown'),
-    strategy_version    TEXT NOT NULL CHECK (length(strategy_version) > 0),
-    ml_model_version    TEXT NOT NULL CHECK (length(ml_model_version) > 0),
-    llm_prompt_version  TEXT NOT NULL CHECK (length(llm_prompt_version) > 0),
-    risk_verdict        TEXT NOT NULL CHECK (risk_verdict IN ('APPROVED', 'REDUCED', 'REJECTED')),
-    execution_result    TEXT,               -- JSON; NULL до отправки, заполняется один раз
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+    id                  TEXT    PRIMARY KEY,                 -- ULID
+    signal_id           TEXT    NOT NULL REFERENCES signals(id),
+    fused_signal_id     TEXT    REFERENCES fused_signals(id),  -- NULL при fusion.enabled=false (classic / classic_fallback)
+    order_id            TEXT    REFERENCES orders(id),       -- NULL до создания ордера и для решений без ордера
+    app_version         TEXT    NOT NULL CHECK (length(app_version) > 0
+                                                AND app_version NOT LIKE '%+unknown'),
+    strategy_version    TEXT    NOT NULL CHECK (length(strategy_version) > 0),
+    ml_model_version    TEXT    NOT NULL CHECK (length(ml_model_version) > 0),
+    llm_prompt_version  TEXT    NOT NULL CHECK (length(llm_prompt_version) > 0),
+    ml_prediction_id    TEXT,                                -- ULID ml_predictions.id; логическая ссылка без FK (см. примечание)
+    llm_status          TEXT,                                -- ok | rejected | fallback_ml_only; NULL, если LLM не участвовал
+    risk_verdict        TEXT    NOT NULL CHECK (risk_verdict IN ('APPROVED', 'REDUCED', 'REJECTED')),
+    risk_reason         TEXT,                                -- причина REJECTED / REDUCED
+    config_hash         TEXT    NOT NULL,
+    mode                TEXT    NOT NULL CHECK (mode IN ('ANALYSIS_ONLY','SIGNAL_ONLY','PAPER','MICRO_LIVE','FULL_AUTO')),
+    execution_result    TEXT,                                -- JSON; NULL до отправки, заполняется один раз
+    explanation         TEXT,                                -- асинхронный LLM explain; заполняется один раз
+    created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+) STRICT;
 
--- Append-only: версии и вердикт неизменяемы, удаление запрещено
+-- Append-only: удаление запрещено; order_id, execution_result, explanation — write-once (NULL → значение);
+-- остальные поля неизменяемы
 CREATE TRIGGER decision_audit_no_delete BEFORE DELETE ON decision_audit
 BEGIN SELECT RAISE(ABORT, 'decision_audit is append-only'); END;
 
@@ -684,13 +692,20 @@ WHEN NEW.signal_id          IS NOT OLD.signal_id
   OR NEW.strategy_version   IS NOT OLD.strategy_version
   OR NEW.ml_model_version   IS NOT OLD.ml_model_version
   OR NEW.llm_prompt_version IS NOT OLD.llm_prompt_version
+  OR NEW.ml_prediction_id   IS NOT OLD.ml_prediction_id
+  OR NEW.llm_status         IS NOT OLD.llm_status
   OR NEW.risk_verdict       IS NOT OLD.risk_verdict
+  OR NEW.risk_reason        IS NOT OLD.risk_reason
+  OR NEW.config_hash        IS NOT OLD.config_hash
+  OR NEW.mode               IS NOT OLD.mode
   OR NEW.created_at         IS NOT OLD.created_at
-  OR OLD.execution_result   IS NOT NULL
+  OR (OLD.order_id         IS NOT NULL AND NEW.order_id         IS NOT OLD.order_id)
+  OR (OLD.execution_result IS NOT NULL AND NEW.execution_result IS NOT OLD.execution_result)
+  OR (OLD.explanation      IS NOT NULL AND NEW.explanation      IS NOT OLD.explanation)
 BEGIN SELECT RAISE(ABORT, 'decision_audit row is immutable'); END;
 ```
 
-Правила заполнения и порядок записи относительно отправки ордера — `VERSIONING.md` §6.1–6.2.
+Правила заполнения и порядок записи относительно отправки ордера — `VERSIONING.md` §6.1–6.2. `ml_prediction_id` — логическая ссылка на `ml_predictions.id` без `REFERENCES`: таблица создаётся миграцией ML-контура (0.10.0), а FK на несуществующую таблицу в SQLite ломает любой INSERT в дочернюю.
 
 > Невалидные fused_signal тоже сохраняются (`valid=0`) — это источник данных для CB-триггера «серия невалидных» (п. 7.4) и для разбора инцидентов.
 
@@ -1209,7 +1224,7 @@ class ModeController:
 
 ```python
 def make_client_order_id(signal_id: str, leg: str = "entry", attempt: int = 0) -> str:
-    """Детерминированный id: 'tb' + base32(sha256(f"{signal_id}|{leg}|{attempt}"))[:22] → 24 символа.
+    """Детерминированный id: 'jn' + base32(sha256(f"{signal_id}|{leg}|{attempt}"))[:22] → 24 символа.
     Влезает в MT5 comment (≤31) и в лимиты бирж (обычно ≤32–36). Тот же сигнал → тот же id."""
 ```
 
@@ -1264,7 +1279,7 @@ class Reconciler:
 
 **Реконнекты:** при восстановлении соединения — сначала `Reconciler.run()`, затем подписки; ордера, отправленные в момент обрыва, переводятся в `UNKNOWN` до сверки.
 
-**Логирование:** каждый переход → `orders` (UPDATE с `version+1`) + `audit_log` (`ORDER_UPDATED`). `decision_audit.execution_result` заполняется один раз (`VERSIONING.md` §6.2, шаг 4).
+**Логирование:** каждый переход → `orders` (UPDATE с `version+1`) + `audit_log` (`ORDER_UPDATED`). `decision_audit.order_id` и `decision_audit.execution_result` заполняются один раз (`VERSIONING.md` §6.2).
 
 ### 7.4. Circuit breaker и kill switch
 
@@ -1312,7 +1327,7 @@ Kill switch доступен: CLI `janus kill-switch --flatten`, GUI (кнопк
 
 ### 7.5. Аудит и воспроизводимость
 
-Для каждого авто-ордера в `decision_audit` есть: `signal_id`, `fused_signal_id`, `app_version`, `strategy_version`, `ml_model_version`, `llm_prompt_version`, `risk_verdict`, `execution_result` (схема — `VERSIONING.md` §6.1).
+Для каждого авто-ордера в `decision_audit` есть: `signal_id`, `fused_signal_id` (NULL без fusion), `order_id`, `app_version`, `strategy_version`, `ml_model_version`, `llm_prompt_version`, `ml_prediction_id`, `llm_status`, `risk_verdict` + `risk_reason`, `config_hash`, `mode`, `execution_result`, `explanation` (схема — `VERSIONING.md` §6.1).
 
 Цепочка воспроизведения:
 
@@ -1519,7 +1534,7 @@ janus/
 │   ├── default.yaml
 │   └── news_rules.yaml
 ├── docs/
-│   ├── TRADING_SYSTEM_SPEC.md     # этот документ
+│   ├── ARCHITECTURE.md            # этот документ
 │   └── ML_LLM_FUSION_SPEC.md
 ├── src/janus/
 │   ├── config/        settings.py, hashing.py
@@ -1586,37 +1601,49 @@ forbidden_modules = ["janus.execution"]
 
 ### 12.2. CLAUDE.md / AGENTS.md (общее содержимое)
 
-```markdown
-# Project rules (janus)
+Источник истины — `CLAUDE.md` в корне репозитория; `AGENTS.md` (Codex) — его копия. Ниже — его нормативная часть дословно; при расхождении побеждает `CLAUDE.md`.
 
-## Commands
-- Install: `uv sync`
-- Check everything: `make check`  (ruff, mypy --strict, lint-imports, pytest)
-- Run paper: `uv run janus run` with TRADING_MODE=PAPER
-- Never run with MICRO_LIVE/FULL_AUTO in agent sessions.
+````markdown
+## Жёсткие правила
 
-## Architecture invariants (MUST)
-1. Every order goes Signal Engine → RiskGate.evaluate() → OrderManager. No other path.
-   Never call adapter.place_order() outside src/janus/execution.
-2. Do not weaken, skip, reorder or mock-out risk checks in non-test code.
-   Changing RiskLimits defaults requires an explicit task statement.
-3. ML/LLM logic lives ONLY in the Fusion implementation (ML_LLM_FUSION_SPEC.md).
-   In this repo src/janus/fusion contains contract + stub only.
-   Do not import sklearn/torch/anthropic/openai anywhere else (import-linter enforces).
-4. Money = Decimal. Time = UTC-aware datetime. IDs = ULID.
-5. Secrets only via Settings/SecretStr from env. Never print, log or hardcode keys.
-6. DB writes only through DbWriter; schema changes only via new migration files.
-7. audit_log is append-only.
+1. LLM не исполняет ордера и не меняет риск-лимиты. LLM только даёт сигнал/обоснование.
+2. Все LLM-выходы проходят Pydantic-валидацию и variance filter. Невалидный выход = отсутствие сигнала.
+3. Fusion не обходит Risk Gate. Любой путь к Execution идёт только через Risk Gate.
+4. Ордер без `app_version`, `strategy_version`, `ml_model_version`, `llm_prompt_version` не исполняется.
+5. Перед генерацией ML-кода, LLM-клиентов, fusion или risk — использовать соответствующий skill.
+6. Секреты только через `.env` (Pydantic Settings). Никогда в коде, тестах, логах, коммитах.
+7. Один этап = одна сессия. Между сессиями — `/clear`.
+8. Режим исполнения по умолчанию — `PAPER`. `MICRO_LIVE` / `FULL_AUTO` включаются только явной конфигурацией.
+9. Любое изменение схемы БД — только через миграцию с записью в `schema_migrations`.
 
-## Skills (MUST use)
-- Before editing src/janus/risk or src/janus/execution: load `auto-trade-risk-gate`.
-- Before editing Fusion implementation: load `hybrid-ml-llm-fusion` (from ML_LLM_FUSION_SPEC).
-- Strategy exits: `exit-strategies`; slippage/costs: `slippage-modeling`.
+## Команды
 
-## Definition of done
-- `make check` green; new behavior covered by tests; docstrings present;
-  if risk/execution touched — tests in tests/e2e for CB, kill switch, idempotency still pass.
+```bash
+pip install -e ".[dev]"     # установка для разработки
+pytest                      # тесты
+ruff check .                # линтер
+ruff format .               # форматирование
+mypy src                    # типы
+janus --version             # версия приложения
+janus backtest              # бэктест стратегии (заглушка до соответствующего этапа)
+janus kill-switch           # аварийная остановка торговли (заглушка до этапа Risk Gate)
 ```
+
+Перед коммитом: `ruff check .` и `pytest` должны проходить.
+
+## Skills (`.claude/skills/`)
+
+| Skill | Когда использовать |
+|---|---|
+| `hybrid-ml-llm-fusion` | логика `fused_signal`, variance filter, веса ML/LLM |
+| `llm-output-validation` | клиенты LLM, промпты, Pydantic-схемы ответов, запись в `llm_calls` |
+| `auto-trade-risk-gate` | лимиты, размер позиции, kill-switch, проверки перед Execution |
+| `release-management` | bump версии, CHANGELOG, annotated tag |
+
+Для ML-обучения и инференса отдельный skill будет создан перед 0.10.0.
+
+Если нужного skill нет в `.claude/skills/` — остановись и сообщи, не пиши код «по памяти».
+````
 
 ### 12.3. Защитные механизмы против «агент обошёл правило»
 
@@ -1624,7 +1651,7 @@ forbidden_modules = ["janus.execution"]
 |---|---|
 | `import-linter` в CI | импорт ML/LLM вне Fusion; Fusion → Execution; прямой вызов адаптера из сигналов |
 | semgrep-правило `no-direct-place-order` | `place_order(` вне `execution/` |
-| CODEOWNERS на `risk/`, `execution/`, `migrations/`, `CLAUDE.md`, `AGENTS.md` | изменения требуют ревью человека |
+| CODEOWNERS на `risk/`, `execution/`, `src/janus/db/migrations/`, `CLAUDE.md`, `AGENTS.md` | изменения требуют ревью человека |
 | Golden-тесты Risk Gate | таблица (вход → вердикт); изменение вердиктов = падение тестов |
 | PR-шаблон с чекбоксом «skill auto-trade-risk-gate использован» + ссылка на чек-лист | процессный контроль |
 | Hook Claude Code `PreToolUse` на Edit/Write в `src/janus/{risk,execution}` | напоминание/блок, если skill не загружен `[ДОПУЩЕНИЕ: реализуется скриптом в .claude/settings.json]` |
@@ -1676,7 +1703,7 @@ Skills `hybrid-ml-llm-fusion` и `llm-output-validation` — в `ML_LLM_FUSION_S
 name: auto-trade-risk-gate
 description: Use BEFORE creating or changing anything in src/janus/risk or src/janus/execution
   (pre-trade checks, position sizing, order state machine, idempotency, circuit breaker, kill switch,
-  trading modes). Enforces the invariants of TRADING_SYSTEM_SPEC.md sections 7.1–7.5.
+  trading modes). Enforces the invariants of ARCHITECTURE.md sections 7.1–7.5.
 ---
 
 # Auto-trade risk gate

@@ -635,7 +635,7 @@ def aggregate_samples(samples: list[LLMContext], cfg: VarianceCfg) -> LLMContext
 
 ### 5.5 Audit
 
-Для каждого `fused_signal`, включая HOLD и NO\_SIGNAL, в `decision_audit` пишутся `app_version`, `strategy_version`, `ml_model_version`, `llm_prompt_version`, `risk_verdict` и `execution_result` (схема — `VERSIONING.md` §6.1). `llm_call_ids` (все сэмплы), `fusion_config_version` и сработавшие правила хранятся в `fused_signals` (`source_breakdown_json`, `fusion_config_version`). По этим данным любое решение должно воспроизводиться офлайн: `replay(decision_id)` вызывает `fuse()` на сохранённых входах и сравнивает результат с записанным. Недетерминированная часть (LLM) воспроизводится по сохранённому `response_json`, а не повторным вызовом.
+Для каждого `fused_signal`, включая HOLD и NO\_SIGNAL, в `decision_audit` пишутся `app_version`, `strategy_version`, `ml_model_version`, `llm_prompt_version`, `ml_prediction_id`, статус LLM (`llm_status`), `risk_verdict` вместе с причиной (`risk_reason`), `config_hash`, `mode`, `execution_result` и асинхронное `explanation` (схема — `VERSIONING.md` §6.1). `llm_call_ids` (все сэмплы), `fusion_config_version` и сработавшие правила хранятся в `fused_signals` (`source_breakdown_json`, `fusion_config_version`). По этим данным любое решение должно воспроизводиться офлайн: `replay(decision_id)` вызывает `fuse()` на сохранённых входах и сравнивает результат с записанным. Недетерминированная часть (LLM) воспроизводится по сохранённому `response_json`, а не повторным вызовом.
 
 ## 6. Интеграция с остальной системой
 
@@ -703,7 +703,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_ml_models_prod
 
 -- Прогнозы -----------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ml_predictions (
-    id           INTEGER PRIMARY KEY,
+    id           TEXT    PRIMARY KEY,                     -- ULID
     model_id     INTEGER NOT NULL REFERENCES ml_models(id),
     asset        TEXT    NOT NULL,
     timestamp    INTEGER NOT NULL,                        -- close_time бара, ms UTC
@@ -748,7 +748,7 @@ CREATE INDEX IF NOT EXISTS ix_llm_calls_hash    ON llm_calls(prompt_hash);
 
 -- Сигналы Fusion [Д9] -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS fused_signals (
-    id                    INTEGER PRIMARY KEY,
+    id                    TEXT    PRIMARY KEY,             -- ULID
     signal_uuid           TEXT    NOT NULL UNIQUE,
     idempotency_key       TEXT    NOT NULL UNIQUE,
     asset                 TEXT    NOT NULL,
@@ -766,20 +766,28 @@ CREATE INDEX IF NOT EXISTS ix_fused_asset_ts ON fused_signals(asset, timestamp);
 
 -- Аудит решений: схема — VERSIONING.md §6.1 (единственный источник истины) ---
 CREATE TABLE decision_audit (
-    id                  INTEGER PRIMARY KEY,
-    signal_id           INTEGER NOT NULL REFERENCES signals(id),
-    fused_signal_id     INTEGER NOT NULL REFERENCES fused_signals(id),
-    app_version         TEXT NOT NULL CHECK (length(app_version) > 0
-                                             AND app_version NOT LIKE '%+unknown'),
-    strategy_version    TEXT NOT NULL CHECK (length(strategy_version) > 0),
-    ml_model_version    TEXT NOT NULL CHECK (length(ml_model_version) > 0),
-    llm_prompt_version  TEXT NOT NULL CHECK (length(llm_prompt_version) > 0),
-    risk_verdict        TEXT NOT NULL CHECK (risk_verdict IN ('APPROVED', 'REDUCED', 'REJECTED')),
-    execution_result    TEXT,               -- JSON; NULL до отправки, заполняется один раз
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+    id                  TEXT    PRIMARY KEY,                 -- ULID
+    signal_id           TEXT    NOT NULL REFERENCES signals(id),
+    fused_signal_id     TEXT    REFERENCES fused_signals(id),  -- NULL при fusion.enabled=false (classic / classic_fallback)
+    order_id            TEXT    REFERENCES orders(id),       -- NULL до создания ордера и для решений без ордера
+    app_version         TEXT    NOT NULL CHECK (length(app_version) > 0
+                                                AND app_version NOT LIKE '%+unknown'),
+    strategy_version    TEXT    NOT NULL CHECK (length(strategy_version) > 0),
+    ml_model_version    TEXT    NOT NULL CHECK (length(ml_model_version) > 0),
+    llm_prompt_version  TEXT    NOT NULL CHECK (length(llm_prompt_version) > 0),
+    ml_prediction_id    TEXT,                                -- ULID ml_predictions.id; логическая ссылка без FK (см. примечание)
+    llm_status          TEXT,                                -- ok | rejected | fallback_ml_only; NULL, если LLM не участвовал
+    risk_verdict        TEXT    NOT NULL CHECK (risk_verdict IN ('APPROVED', 'REDUCED', 'REJECTED')),
+    risk_reason         TEXT,                                -- причина REJECTED / REDUCED
+    config_hash         TEXT    NOT NULL,
+    mode                TEXT    NOT NULL CHECK (mode IN ('ANALYSIS_ONLY','SIGNAL_ONLY','PAPER','MICRO_LIVE','FULL_AUTO')),
+    execution_result    TEXT,                                -- JSON; NULL до отправки, заполняется один раз
+    explanation         TEXT,                                -- асинхронный LLM explain; заполняется один раз
+    created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+) STRICT;
 
--- Append-only: версии и вердикт неизменяемы, удаление запрещено
+-- Append-only: удаление запрещено; order_id, execution_result, explanation — write-once (NULL → значение);
+-- остальные поля неизменяемы
 CREATE TRIGGER decision_audit_no_delete BEFORE DELETE ON decision_audit
 BEGIN SELECT RAISE(ABORT, 'decision_audit is append-only'); END;
 
@@ -790,13 +798,20 @@ WHEN NEW.signal_id          IS NOT OLD.signal_id
   OR NEW.strategy_version   IS NOT OLD.strategy_version
   OR NEW.ml_model_version   IS NOT OLD.ml_model_version
   OR NEW.llm_prompt_version IS NOT OLD.llm_prompt_version
+  OR NEW.ml_prediction_id   IS NOT OLD.ml_prediction_id
+  OR NEW.llm_status         IS NOT OLD.llm_status
   OR NEW.risk_verdict       IS NOT OLD.risk_verdict
+  OR NEW.risk_reason        IS NOT OLD.risk_reason
+  OR NEW.config_hash        IS NOT OLD.config_hash
+  OR NEW.mode               IS NOT OLD.mode
   OR NEW.created_at         IS NOT OLD.created_at
-  OR OLD.execution_result   IS NOT NULL
+  OR (OLD.order_id         IS NOT NULL AND NEW.order_id         IS NOT OLD.order_id)
+  OR (OLD.execution_result IS NOT NULL AND NEW.execution_result IS NOT OLD.execution_result)
+  OR (OLD.explanation      IS NOT NULL AND NEW.explanation      IS NOT OLD.explanation)
 BEGIN SELECT RAISE(ABORT, 'decision_audit row is immutable'); END;
 ```
 
-**Примечания.** `STRICT` требует SQLite ≥ 3.37, частичные индексы — ≥ 3.8; в стандартной сборке Python 3.11+ обычно идёт более новая версия, но её стоит проверить через `sqlite3.sqlite_version`. Записи в `decision_audit` — append-only; единственное допустимое изменение — однократное заполнение `execution_result` (триггеры выше, `VERSIONING.md` §6.1–6.2). Очистка `llm_calls.response_json` старше 90 дней — ежедневный job (метаданные вызова остаются).
+**Примечания.** `STRICT` требует SQLite ≥ 3.37, частичные индексы — ≥ 3.8; в стандартной сборке Python 3.11+ обычно идёт более новая версия, но её стоит проверить через `sqlite3.sqlite_version`. Записи в `decision_audit` — append-only; допустимы только однократные заполнения `order_id`, `execution_result`, `explanation` (триггеры выше, `VERSIONING.md` §6.1–6.2). `fused_signal_id` равен NULL при `fusion.enabled=false`. `ml_prediction_id` — логическая ссылка на `ml_predictions.id` без `REFERENCES`: таблица создаётся миграцией ML-контура (0.10.0), а FK на несуществующую таблицу в SQLite ломает любой INSERT в дочернюю. Очистка `llm_calls.response_json` старше 90 дней — ежедневный job (метаданные вызова остаются).
 
 Типовой запрос для контроля бюджета:
 
@@ -986,7 +1001,7 @@ description: Use before writing or changing Risk Gate, pre-trade checks, circuit
 5. Лимиты читаются из read-only конфига; код не может их писать. Переключение в auto —
    только CLI-команда человека с записью в audit_log.
 6. client_order_id = idempotency_key[:32]; повтор после таймаута — сначала запрос статуса ордера.
-7. Каждое решение → decision_audit.risk_verdict (APPROVED / REDUCED / REJECTED), INSERT + COMMIT
+7. Каждое решение → decision_audit.risk_verdict (APPROVED / REDUCED / REJECTED) + risk_reason, INSERT + COMMIT
    до отправки ордера; каждый отчёт → execution_result (заполняется один раз).
 8. Стоп-лосс присутствует у каждой позиции (на бирже, если поддерживается) — см. exit-strategies.
 

@@ -127,7 +127,7 @@ CREATE TABLE artifacts (
 |---|---|---|---|---|
 | Приложение | `app_version` | `pyproject.toml`; git tag `vX.Y.Z`; CHANGELOG | Release-владелец (агент через skill, подтверждает человек) | В release-PR `develop → main` |
 | Компонент | `api_version` | `versions.py`, спецификация Fusion, поле каждого сигнала | Автор изменения контракта | В PR, меняющем контракт Fusion |
-| Компонент | `db_schema_version` | Таблица `schema_migrations`; `EXPECTED_DB_SCHEMA` | Автор миграции | В PR, добавляющем файл `migrations/NNNN_*.sql` |
+| Компонент | `db_schema_version` | Таблица `schema_migrations`; `EXPECTED_DB_SCHEMA` | Автор миграции | В PR, добавляющем файл `src/janus/db/migrations/NNNN_*.sql` |
 | Компонент | `config_version` | Корень конфига; `CONFIG_VERSION` | Автор изменения конфига | В PR с несовместимым изменением структуры конфига |
 | Артефакт | `strategy_version` | Реестр `artifacts`, `artifacts/strategies/` | Автор стратегии | При любом изменении кода или параметров стратегии |
 | Артефакт | `ml_model_version` | Реестр `artifacts`, `artifacts/ml/` | Пайплайн обучения (автоматически) | При каждом переобучении / смене признаков |
@@ -179,9 +179,9 @@ CREATE TABLE artifacts (
 - `janus.__version__` через `importlib.metadata`.
 - Модуль `janus.versions` с ожидаемыми версиями компонентов.
 - Мигратор SQLite: таблица `schema_migrations` с checksum и флагом совместимости, авто-бэкап перед миграцией.
-- Миграция `0001_init`: служебные таблицы `schema_migrations`, `artifacts`.
+- Миграция `0001_core`: служебные таблицы `schema_migrations`, `artifacts`.
 - Загрузчик конфига с проверкой `config_version`.
-- CLI-команда `janus version` — выводит версии приложения, схемы БД, конфига.
+- CLI-команда `janus --version` — выводит версии приложения, схемы БД, конфига.
 - Структурированное логирование (JSON), версия приложения в каждой записи.
 - CI: линтер, типизация, тесты, проверка совпадения версии `pyproject.toml` и git-тега.
 - Документы: `VERSIONING.md`, `CHANGELOG.md`, skill `release-management`.
@@ -196,7 +196,7 @@ CREATE TABLE artifacts (
 
 | Версия | Этап | Готово (критерий релиза) | Компоненты / артефакты, которые растут |
 |---|---|---|---|
-| **0.1.0** | Каркас | Пакет, CI, мигратор, загрузчик конфига, `janus version` | `db_schema` → 1; `config` → 1 |
+| **0.1.0** | Каркас | Пакет, CI, мигратор, загрузчик конфига, `janus --version` | `db_schema` → 1; `config` → 1 |
 | **0.2.0** | Data Layer | Хранилище OHLCV/инструментов, адаптеры Forex/крипто/акции (только чтение), идемпотентная загрузка истории | `db_schema` +N (instruments, candles); `config` +1 (источники данных) |
 | **0.3.0** | Стратегии + бэктест | Интерфейс стратегии, реестр, детерминированный бэктест с отчётом, Signal Engine | `db_schema` +N (signals, backtest_runs); первый `strategy_v1` |
 | **0.4.0** | Fusion-контракт | Спецификация и валидация контракта, stub-реализация Fusion, таблица fused_signals | `api_version` → 1.0; `db_schema` +1 |
@@ -225,7 +225,7 @@ CREATE TABLE artifacts (
 ### 5.2 MINOR (`X.Y.Z → X.Y+1.0`)
 
 - Новая функциональность с обратной совместимостью.
-- Любое изменение схемы БД ДОЛЖНО идти через новую миграцию (`migrations/NNNN_*.sql`) и попадает только в MINOR или MAJOR.
+- Любое изменение схемы БД ДОЛЖНО идти через новую миграцию (`src/janus/db/migrations/NNNN_*.sql`) и попадает только в MINOR или MAJOR.
 - Изменение схемы без миграции (ручной `ALTER`, правка применённой миграции) **ЗАПРЕЩЕНО**.
 
 ### 5.3 BREAKING внутри 0.x
@@ -258,20 +258,28 @@ CREATE TABLE artifacts (
 
 ```sql
 CREATE TABLE decision_audit (
-    id                  INTEGER PRIMARY KEY,
-    signal_id           INTEGER NOT NULL REFERENCES signals(id),
-    fused_signal_id     INTEGER NOT NULL REFERENCES fused_signals(id),
-    app_version         TEXT NOT NULL CHECK (length(app_version) > 0
-                                             AND app_version NOT LIKE '%+unknown'),
-    strategy_version    TEXT NOT NULL CHECK (length(strategy_version) > 0),
-    ml_model_version    TEXT NOT NULL CHECK (length(ml_model_version) > 0),
-    llm_prompt_version  TEXT NOT NULL CHECK (length(llm_prompt_version) > 0),
-    risk_verdict        TEXT NOT NULL CHECK (risk_verdict IN ('APPROVED', 'REDUCED', 'REJECTED')),
-    execution_result    TEXT,               -- JSON; NULL до отправки, заполняется один раз
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
+    id                  TEXT    PRIMARY KEY,                 -- ULID
+    signal_id           TEXT    NOT NULL REFERENCES signals(id),
+    fused_signal_id     TEXT    REFERENCES fused_signals(id),  -- NULL при fusion.enabled=false (classic / classic_fallback)
+    order_id            TEXT    REFERENCES orders(id),       -- NULL до создания ордера и для решений без ордера
+    app_version         TEXT    NOT NULL CHECK (length(app_version) > 0
+                                                AND app_version NOT LIKE '%+unknown'),
+    strategy_version    TEXT    NOT NULL CHECK (length(strategy_version) > 0),
+    ml_model_version    TEXT    NOT NULL CHECK (length(ml_model_version) > 0),
+    llm_prompt_version  TEXT    NOT NULL CHECK (length(llm_prompt_version) > 0),
+    ml_prediction_id    TEXT,                                -- ULID ml_predictions.id; логическая ссылка без FK (см. примечание)
+    llm_status          TEXT,                                -- ok | rejected | fallback_ml_only; NULL, если LLM не участвовал
+    risk_verdict        TEXT    NOT NULL CHECK (risk_verdict IN ('APPROVED', 'REDUCED', 'REJECTED')),
+    risk_reason         TEXT,                                -- причина REJECTED / REDUCED
+    config_hash         TEXT    NOT NULL,
+    mode                TEXT    NOT NULL CHECK (mode IN ('ANALYSIS_ONLY','SIGNAL_ONLY','PAPER','MICRO_LIVE','FULL_AUTO')),
+    execution_result    TEXT,                                -- JSON; NULL до отправки, заполняется один раз
+    explanation         TEXT,                                -- асинхронный LLM explain; заполняется один раз
+    created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+) STRICT;
 
--- Append-only: версии и вердикт неизменяемы, удаление запрещено
+-- Append-only: удаление запрещено; order_id, execution_result, explanation — write-once (NULL → значение);
+-- остальные поля неизменяемы
 CREATE TRIGGER decision_audit_no_delete BEFORE DELETE ON decision_audit
 BEGIN SELECT RAISE(ABORT, 'decision_audit is append-only'); END;
 
@@ -282,13 +290,22 @@ WHEN NEW.signal_id          IS NOT OLD.signal_id
   OR NEW.strategy_version   IS NOT OLD.strategy_version
   OR NEW.ml_model_version   IS NOT OLD.ml_model_version
   OR NEW.llm_prompt_version IS NOT OLD.llm_prompt_version
+  OR NEW.ml_prediction_id   IS NOT OLD.ml_prediction_id
+  OR NEW.llm_status         IS NOT OLD.llm_status
   OR NEW.risk_verdict       IS NOT OLD.risk_verdict
+  OR NEW.risk_reason        IS NOT OLD.risk_reason
+  OR NEW.config_hash        IS NOT OLD.config_hash
+  OR NEW.mode               IS NOT OLD.mode
   OR NEW.created_at         IS NOT OLD.created_at
-  OR OLD.execution_result   IS NOT NULL
+  OR (OLD.order_id         IS NOT NULL AND NEW.order_id         IS NOT OLD.order_id)
+  OR (OLD.execution_result IS NOT NULL AND NEW.execution_result IS NOT OLD.execution_result)
+  OR (OLD.explanation      IS NOT NULL AND NEW.explanation      IS NOT OLD.explanation)
 BEGIN SELECT RAISE(ABORT, 'decision_audit row is immutable'); END;
 ```
 
-Рекомендуемые дополнительные поля (с 0.6.0): `api_version`, `db_schema_version`, `config_version`, `git_commit`, `mode` (`PAPER` / `MICRO_LIVE` / `FULL_AUTO`).
+`fused_signal_id` равен NULL при `fusion.enabled=false` (классические стратегии / `classic_fallback`). `ml_prediction_id` — логическая ссылка на `ml_predictions.id` без `REFERENCES`: таблица создаётся миграцией ML-контура (0.10.0), а FK на несуществующую таблицу в SQLite ломает любой INSERT в дочернюю.
+
+Рекомендуемые дополнительные поля (с 0.6.0): `api_version`, `db_schema_version`, `config_version`, `git_commit`.
 
 ### 6.2 Правило исполнения
 
@@ -299,7 +316,7 @@ BEGIN SELECT RAISE(ABORT, 'decision_audit row is immutable'); END;
 1. Сформировать запись `decision_audit` со всеми версиями и `risk_verdict`.
 2. Проверить полноту (код ниже) → `INSERT` → `COMMIT`.
 3. Только после успешного `COMMIT` отправить ордер.
-4. Записать `execution_result` (единственный допустимый `UPDATE`).
+4. Записать `order_id` и `execution_result` (однократные `UPDATE`; кроме них допустимо только однократное заполнение `explanation`).
 
 Ошибка на шагах 1–2 → ордер не отправляется, алерт уровня P1.
 
@@ -334,7 +351,7 @@ Janus 0.10.0                                  app_version
      └─ prompt_news_v1                        llm_prompt_version
          → fused_signal #4410 (api_version 1.1)
              → Risk Gate: REDUCED (0.5 → 0.3 лота)
-                 → decision_audit #1907
+                 → decision_audit 01JD3XB4…
                      → order → FILLED @ 1.08412
 ```
 
@@ -351,10 +368,10 @@ SELECT d.id, d.created_at, d.app_version,
        ap.metadata AS prompt_meta          -- LLM-модель, temperature
 FROM decision_audit d
 JOIN signals       s  ON s.id = d.signal_id
-JOIN fused_signals f  ON f.id = d.fused_signal_id
+LEFT JOIN fused_signals f ON f.id = d.fused_signal_id
 LEFT JOIN artifacts am ON am.kind = 'ml_model'   AND am.version = d.ml_model_version
 LEFT JOIN artifacts ap ON ap.kind = 'llm_prompt' AND ap.version = d.llm_prompt_version
-WHERE d.id = 1907;
+WHERE d.id = '01JD3XB4K8M2N5P7Q9R1S3T5V7';
 ```
 
 Код приложения на момент решения: `git checkout v0.10.0`.
@@ -485,7 +502,7 @@ print(f"OK: {version}")
 - Применённая миграция неизменна; checksum проверяется при старте.
 
 ```sql
--- migrations/0004_orders_client_id.sql
+-- src/janus/db/migrations/0004_orders_client_id.sql
 -- compat: expand
 ALTER TABLE orders ADD COLUMN client_order_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS ix_orders_client_order_id ON orders(client_order_id);
@@ -549,7 +566,7 @@ description: Версионирование и релизы Janus. Исполь�
    |---|---|
    | Багфикс без схемы БД | `fix:`, запись в «Исправлено» |
    | Новая фича | `feat:`, запись в «Добавлено» |
-   | Изменение схемы БД | новый файл `migrations/NNNN_<имя>.sql` с `-- compat: expand|contract`, `EXPECTED_DB_SCHEMA += 1` |
+   | Изменение схемы БД | новый файл `src/janus/db/migrations/NNNN_<имя>.sql` с `-- compat: expand|contract`, `EXPECTED_DB_SCHEMA += 1` |
    | `compat: contract`, удаление поля контракта, переименование ключа конфига | `breaking:` / `!`, запись с `**BREAKING:**` + путь миграции |
    | Контракт Fusion | обновить `FUSION_API_VERSION` и спецификацию |
    | Формат конфига | `CONFIG_VERSION += 1`, мигратор конфига N-1 → N |
@@ -575,7 +592,7 @@ janus doctor
 
 ## Пример
 Задача: «Добавь в orders колонку client_order_id».
-- `migrations/0004_orders_client_id.sql`, `-- compat: expand`
+- `src/janus/db/migrations/0004_orders_client_id.sql`, `-- compat: expand`
 - `EXPECTED_DB_SCHEMA = 4`
 - Коммит: `feat(db): добавить client_order_id в orders`
 - CHANGELOG `[Unreleased]` → «Добавлено»: «Колонка `orders.client_order_id` для идемпотентной отправки ордеров (db_schema_version 4).»
@@ -624,7 +641,7 @@ janus doctor
   Миграция: `janus config migrate` либо ручное переименование ключа.
 
 ### Исправлено
-- `janus version` падал при отсутствии файла БД.
+- `janus --version` падал при отсутствии файла БД.
 
 ### Безопасность
 - Ключи адаптеров маскируются в логах.

@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "janus"
+version = "0.1.0"
+description = "Janus — гибридная торговая система ML+LLM (Форекс, крипто, акции)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-Proprietary"
+authors = [{ name = "Janus Team" }]
+dependencies = [
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "fastapi",
+    "uvicorn[standard]",
+    "typer",
+    "sqlalchemy>=2",
+    "httpx",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "mypy",
+]
+# Опционально: для этапа 0.10.0 (ML-модели). На этапе 0.1.0 не используется.
+ml = [
+    "lightgbm",
+    "scikit-learn",
+    "pandas",
+    "numpy",
+]
+
+[project.scripts]
+janus = "janus.interfaces.cli.main:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+strict = true
+warn_unused_configs = true

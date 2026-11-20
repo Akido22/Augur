@@ -98,7 +98,7 @@
 
 **Правило переключения (MUST):** режим меняется только при одновременном выполнении трёх условий:
 1. Значение `TRADING_MODE` в конфиге равно целевому режиму (или выше — см. `max_allowed_mode`).
-2. CLI-команда `tradebot mode set <MODE> --confirm` с вводом одноразового кода подтверждения (для `MICRO_LIVE`/`FULL_AUTO`).
+2. CLI-команда `janus mode set <MODE> --confirm` с вводом одноразового кода подтверждения (для `MICRO_LIVE`/`FULL_AUTO`).
 3. Запись `MODE_CHANGED` в `audit_log` и в `mode_state` прошла успешно (иначе откат).
 
 Понижение режима (например, `FULL_AUTO → PAPER`) разрешено без кода подтверждения. GUI может **инициировать** запрос на смену режима, но подтверждение выполняется через CLI `[ДОПУЩЕНИЕ]` — снижает риск случайного клика и CSRF.
@@ -121,25 +121,25 @@
 
 | Модуль | Пакет | Ответственность | Зависит от |
 |---|---|---|---|
-| Config | `src/config` | Загрузка и валидация настроек, секреты, хеш конфига | — |
-| Data Layer | `src/data` | OHLCV, тики, новости, макро; нормализация; кэш в SQLite | config, db, adapters (read-only) |
-| Market Adapters | `src/adapters` | Унифицированный доступ к MT5 / CCXT / Alpaca / Paper | config |
-| Strategy Framework | `src/strategies` | Классические стратегии, реестр | data (DTO) |
-| Backtest Engine | `src/backtest` | Событийный бэктест, комиссии, проскальзывание, метрики | strategies, data, risk |
-| Signal Engine | `src/signals` | Сбор сигналов стратегий, вызов FusionClient, публикация `signal_ready` | strategies, fusion (контракт) |
-| Fusion (контракт) | `src/fusion` | DTO `FusedSignal`, `FusionClient`, заглушка | — |
-| Risk Engine | `src/risk` | Pre/post-trade лимиты, sizing, Risk Gate | config, db |
-| Execution | `src/execution` | Ордера, позиции, идемпотентность, CB, kill switch, режимы | adapters, risk, db |
-| News & Sentiment | `src/news` | Получение новостей, дедуп, скоринг, `news_event` | config, db |
-| Notification | `src/notify` | Telegram / Email / Webhook | config |
-| Orchestrator | `src/orchestrator` | Event bus, планировщик, жизненный цикл | все |
-| Interfaces | `src/interfaces` | FastAPI + WebSocket, CLI (Typer), общие DTO | orchestrator |
-| DB | `src/db` | Схема, миграции, репозитории, single-writer | — |
+| Config | `src/janus/config` | Загрузка и валидация настроек, секреты, хеш конфига | — |
+| Data Layer | `src/janus/data` | OHLCV, тики, новости, макро; нормализация; кэш в SQLite | config, db, adapters (read-only) |
+| Market Adapters | `src/janus/adapters` | Унифицированный доступ к MT5 / CCXT / Alpaca / Paper | config |
+| Strategy Framework | `src/janus/strategies` | Классические стратегии, реестр | data (DTO) |
+| Backtest Engine | `src/janus/backtest` | Событийный бэктест, комиссии, проскальзывание, метрики | strategies, data, risk |
+| Signal Engine | `src/janus/signals` | Сбор сигналов стратегий, вызов FusionClient, публикация `signal_ready` | strategies, fusion (контракт) |
+| Fusion (контракт) | `src/janus/fusion` | DTO `FusedSignal`, `FusionClient`, заглушка | — |
+| Risk Engine | `src/janus/risk` | Pre/post-trade лимиты, sizing, Risk Gate | config, db |
+| Execution | `src/janus/execution` | Ордера, позиции, идемпотентность, CB, kill switch, режимы | adapters, risk, db |
+| News & Sentiment | `src/janus/news` | Получение новостей, дедуп, скоринг, `news_event` | config, db |
+| Notification | `src/janus/notify` | Telegram / Email / Webhook | config |
+| Orchestrator | `src/janus/orchestrator` | Event bus, планировщик, жизненный цикл | все |
+| Interfaces | `src/janus/interfaces` | FastAPI + WebSocket, CLI (Typer), общие DTO | orchestrator |
+| DB | `src/janus/db` | Схема, миграции, репозитории, single-writer | — |
 
 ### 2.2. Config / Settings
 
 ```python
-# src/config/settings.py
+# src/janus/config/settings.py
 from enum import StrEnum
 from decimal import Decimal
 from pydantic import BaseModel, Field, SecretStr
@@ -209,7 +209,7 @@ def config_hash(settings: Settings) -> str:
 Ответственность: получение, нормализация, хранение и выдача рыночных данных. Единственный источник данных для стратегий, бэктеста и Fusion-входа.
 
 ```python
-# src/data/models.py
+# src/janus/data/models.py
 class Bar(BaseModel, frozen=True):
     symbol: str            # каноническое имя: "BTC/USDT", "EURUSD", "AAPL"
     venue: str             # "ccxt:binance" | "mt5" | "alpaca"
@@ -222,7 +222,7 @@ class Tick(BaseModel, frozen=True):
     symbol: str; venue: str; ts: datetime
     bid: Decimal; ask: Decimal; last: Decimal | None = None; volume: float | None = None
 
-# src/data/service.py
+# src/janus/data/service.py
 class MarketDataService:
     async def get_bars(self, symbol: str, timeframe: str, start: datetime,
                        end: datetime, *, venue: str | None = None) -> list[Bar]:
@@ -250,9 +250,11 @@ class SymbolNormalizer:
 ### 2.5. Strategy Framework
 
 ```python
-# src/strategies/base.py
+# src/janus/strategies/base.py
 class SignalAction(StrEnum):
-    BUY = "BUY"; SELL = "SELL"; CLOSE = "CLOSE"; HOLD = "HOLD"
+    BUY = "BUY"; SELL = "SELL"; CLOSE = "CLOSE"; REDUCE = "REDUCE"
+    HOLD = "HOLD"            # решение принято: ничего не делать
+    NO_SIGNAL = "NO_SIGNAL"  # решения нет: входы недостаточны/невалидны (NO_SIGNAL ≠ HOLD)
 
 class StrategySignal(BaseModel, frozen=True):
     signal_id: str              # ULID
@@ -302,7 +304,7 @@ class StrategyRegistry:
 Точка входа для сигналов. **MUST NOT** содержать ML-кода и вызывать LLM.
 
 ```python
-# src/signals/engine.py
+# src/janus/signals/engine.py
 class SignalReady(BaseModel, frozen=True):
     """Событие signal_ready — единственный вход Risk Gate."""
     signal_id: str                       # ULID нового итогового сигнала
@@ -332,10 +334,27 @@ class SignalEngine:
         конфликт BUY/SELL → HOLD; strength = max по направлению большинства."""
 ```
 
+**`SignalAction` (6 значений):** `BUY`, `SELL`, `CLOSE`, `REDUCE`, `HOLD`, `NO_SIGNAL`.
+
+- `HOLD` — источник оценил ситуацию и решил не действовать (порог не пройден, veto, конфликт).
+- `NO_SIGNAL` — оценки нет: обязательный вход отсутствует, устарел или невалиден. `NO_SIGNAL` ≠ `HOLD`; в аудите и аналитике считаются раздельно.
+- Оба значения неисполняемы: Risk Gate отклоняет их чеком R4.
+
+**Маппинг Fusion → Signal Engine** (`action` из `ML_LLM_FUSION_SPEC.md` §4.5–4.6 → `SignalAction`; выполняется на границе `FusionClient` до структурной валидации п. 5.5):
+
+| Fusion `action` | `SignalAction` |
+|---|---|
+| `enter_long` | `BUY` |
+| `enter_short` | `SELL` |
+| `exit` | `CLOSE` |
+| `reduce` | `REDUCE` |
+| `hold` | `HOLD` |
+| `no_signal` | `NO_SIGNAL` |
+
 ### 2.8. Risk Engine
 
 ```python
-# src/risk/gate.py
+# src/janus/risk/gate.py
 class CheckResult(BaseModel, frozen=True):
     name: str                 # "signal_ttl", "daily_loss", ...
     passed: bool
@@ -438,7 +457,7 @@ class Orchestrator:
 - Идентификаторы — ULID (`TEXT`, лексикографически сортируемы по времени).
 - **Single writer:** все записи идут через `DbWriter` — одну asyncio-задачу с очередью; чтение — пул соединений. Это устраняет `database is locked` при конкурентной записи.
 - Идемпотентная вставка: `INSERT ... ON CONFLICT(<natural key>) DO NOTHING` или `DO UPDATE` по явному правилу.
-- Миграции — нумерованные SQL-файлы `src/db/migrations/NNNN_name.sql`, таблица `schema_version`.
+- Миграции — нумерованные SQL-файлы `src/janus/db/migrations/NNNN_name.sql`, таблица `schema_migrations` (DDL и правила — `VERSIONING.md` §2.2, §8).
 - `audit_log` — append-only: триггеры запрещают `UPDATE`/`DELETE`.
 
 ### 3.2. DDL основных таблиц
@@ -486,7 +505,7 @@ CREATE TABLE signals (
     params_hash    TEXT,
     symbol         TEXT    NOT NULL,
     timeframe      TEXT,
-    action         TEXT    NOT NULL CHECK (action IN ('BUY','SELL','CLOSE','HOLD')),
+    action         TEXT    NOT NULL CHECK (action IN ('BUY','SELL','CLOSE','REDUCE','HOLD','NO_SIGNAL')),
     strength       REAL    NOT NULL CHECK (strength BETWEEN 0 AND 1),
     source         TEXT    NOT NULL CHECK (source IN ('classic','fusion','classic_fallback')),
     fused_signal_id TEXT   REFERENCES fused_signals(id),
@@ -624,7 +643,7 @@ CREATE TABLE fused_signals (
     id                    TEXT    PRIMARY KEY,   -- ULID, выдаётся Signal Engine при приёме
     signal_id             TEXT    NOT NULL,      -- итоговый signals.id (kind='final')
     fusion_request_id     TEXT    NOT NULL,      -- id запроса к Fusion (для связи с FUSION SPEC таблицами)
-    action                TEXT    NOT NULL CHECK (action IN ('BUY','SELL','CLOSE','HOLD')),
+    action                TEXT    NOT NULL CHECK (action IN ('BUY','SELL','CLOSE','REDUCE','HOLD','NO_SIGNAL')),
     strength              REAL    NOT NULL CHECK (strength BETWEEN 0 AND 1),
     source_breakdown_json TEXT    NOT NULL,      -- {"classic":0.6,"ml":0.3,"llm":0.1}
     risk_flags_json       TEXT    NOT NULL DEFAULT '[]',
@@ -639,23 +658,39 @@ CREATE UNIQUE INDEX ux_fused_request ON fused_signals(fusion_request_id);
 CREATE INDEX ix_fused_signal ON fused_signals(signal_id);
 CREATE INDEX ix_fused_created ON fused_signals(created_at);
 
+-- Схема decision_audit — VERSIONING.md §6.1 (единственный источник истины)
 CREATE TABLE decision_audit (
-    id                TEXT    PRIMARY KEY,       -- ULID
-    signal_id         TEXT    NOT NULL REFERENCES signals(id),
-    fused_signal_id   TEXT    REFERENCES fused_signals(id),   -- NULL, если fusion не участвовал
-    risk_verdict      TEXT    NOT NULL CHECK (risk_verdict IN ('APPROVED','REJECTED','SKIPPED_MODE')),
-    risk_checks_json  TEXT    NOT NULL,          -- список CheckResult
-    order_id          TEXT    REFERENCES orders(id),
-    execution_result  TEXT    NOT NULL CHECK (execution_result IN
-                      ('NOT_EXECUTED','SUBMITTED','FILLED','PARTIAL','REJECTED','CANCELLED','DUPLICATE','ERROR')),
-    mode              TEXT    NOT NULL,
-    config_hash       TEXT    NOT NULL,
-    created_at        INTEGER NOT NULL,
-    updated_at        INTEGER NOT NULL
-) STRICT;
-CREATE UNIQUE INDEX ux_decision_signal ON decision_audit(signal_id);
-CREATE INDEX ix_decision_created ON decision_audit(created_at);
+    id                  INTEGER PRIMARY KEY,
+    signal_id           INTEGER NOT NULL REFERENCES signals(id),
+    fused_signal_id     INTEGER NOT NULL REFERENCES fused_signals(id),
+    app_version         TEXT NOT NULL CHECK (length(app_version) > 0
+                                             AND app_version NOT LIKE '%+unknown'),
+    strategy_version    TEXT NOT NULL CHECK (length(strategy_version) > 0),
+    ml_model_version    TEXT NOT NULL CHECK (length(ml_model_version) > 0),
+    llm_prompt_version  TEXT NOT NULL CHECK (length(llm_prompt_version) > 0),
+    risk_verdict        TEXT NOT NULL CHECK (risk_verdict IN ('APPROVED', 'REDUCED', 'REJECTED')),
+    execution_result    TEXT,               -- JSON; NULL до отправки, заполняется один раз
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Append-only: версии и вердикт неизменяемы, удаление запрещено
+CREATE TRIGGER decision_audit_no_delete BEFORE DELETE ON decision_audit
+BEGIN SELECT RAISE(ABORT, 'decision_audit is append-only'); END;
+
+CREATE TRIGGER decision_audit_immutable BEFORE UPDATE ON decision_audit
+WHEN NEW.signal_id          IS NOT OLD.signal_id
+  OR NEW.fused_signal_id    IS NOT OLD.fused_signal_id
+  OR NEW.app_version        IS NOT OLD.app_version
+  OR NEW.strategy_version   IS NOT OLD.strategy_version
+  OR NEW.ml_model_version   IS NOT OLD.ml_model_version
+  OR NEW.llm_prompt_version IS NOT OLD.llm_prompt_version
+  OR NEW.risk_verdict       IS NOT OLD.risk_verdict
+  OR NEW.created_at         IS NOT OLD.created_at
+  OR OLD.execution_result   IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'decision_audit row is immutable'); END;
 ```
+
+Правила заполнения и порядок записи относительно отправки ордера — `VERSIONING.md` §6.1–6.2.
 
 > Невалидные fused_signal тоже сохраняются (`valid=0`) — это источник данных для CB-триггера «серия невалидных» (п. 7.4) и для разбора инцидентов.
 
@@ -665,7 +700,7 @@ CREATE INDEX ix_decision_created ON decision_audit(created_at);
 |---|---|
 | Бары за диапазон | PK `ohlcv(venue,symbol,timeframe,ts_open)` |
 | Активные ордера для реконсиляции | частичный `ix_orders_state` |
-| Цепочка решения по сигналу | `ux_decision_signal`, `ix_fused_signal`, `ix_audit_ref` |
+| Цепочка решения по сигналу | `ix_fused_signal`, `ix_audit_ref` |
 | Последние N fused_signal (для streak) | `ix_fused_created` |
 | Дневной PnL | PK `portfolio_snapshots(mode, ts)` |
 | Новости за окно | `ix_news_published` |
@@ -698,7 +733,7 @@ class AuditRepository:
 ### 4.1. Унифицированный протокол адаптера
 
 ```python
-# src/adapters/base.py
+# src/janus/adapters/base.py
 class OrderRequest(BaseModel, frozen=True):
     client_order_id: str
     symbol: str                 # каноническое имя
@@ -863,7 +898,7 @@ Alpaca нативно поддерживает `client_order_id` — этало�
         "properties": {
           "signal_id": {"type": "string"},
           "strategy":  {"type": "string"},
-          "action":    {"enum": ["BUY", "SELL", "CLOSE", "HOLD"]},
+          "action":    {"enum": ["BUY", "SELL", "CLOSE", "REDUCE", "HOLD", "NO_SIGNAL"]},
           "strength":  {"type": "number", "minimum": 0, "maximum": 1}
         }
       }
@@ -904,7 +939,7 @@ Alpaca нативно поддерживает `client_order_id` — этало�
   "properties": {
     "request_id":       {"type": "string", "description": "должен совпадать с FusionRequest.request_id"},
     "contract_version": {"const": "fused_signal/1.0"},
-    "action":           {"enum": ["BUY", "SELL", "CLOSE", "HOLD"]},
+    "action":           {"enum": ["BUY", "SELL", "CLOSE", "REDUCE", "HOLD", "NO_SIGNAL"]},
     "strength":         {"type": "number", "minimum": 0, "maximum": 1},
     "source_breakdown": {
       "type": "object",
@@ -936,7 +971,7 @@ Alpaca нативно поддерживает `client_order_id` — этало�
 ### 5.4. Python-контракт
 
 ```python
-# src/fusion/contract.py
+# src/janus/fusion/contract.py
 FUSION_CONTRACT_VERSION = "fused_signal/1.0"
 
 class FusedSignal(BaseModel, frozen=True):
@@ -1006,7 +1041,7 @@ async def resolve_signal(self, strat_signals, ctx) -> SignalReady:
 Нормативно:
 1. Signal Engine **MUST NOT** импортировать ML-библиотеки (`sklearn`, `torch`, `lightgbm`, …) и LLM SDK (`anthropic`, `openai`, …). Проверка — `import-linter` + CI-grep.
 2. Если Fusion недоступен/невалиден → режим **ML-disabled** (только классика) + `WARN` в `audit_log`.
-3. `fused_signal` **MUST** пройти Risk Gate. Ни один путь кода не ведёт из `src/fusion` в `src/execution` (контракт `import-linter`).
+3. `fused_signal` **MUST** пройти Risk Gate. Ни один путь кода не ведёт из `src/janus/fusion` в `src/janus/execution` (контракт `import-linter`).
 4. `ttl_seconds` из fused_signal определяет `expires_at`; Risk Gate отклоняет просроченные (чек `signal_ttl`).
 5. Fusion не может повышать режим, менять лимиты или отключать чеки — его `risk_flags` могут только **ужесточать** решение (см. 7.2, чек `risk_flags`).
 
@@ -1117,7 +1152,7 @@ class ModeController:
 | Режим | Особенности исполнения |
 |---|---|
 | `PAPER` | Адаптер = `PaperBroker`; полный Risk Gate; ордера в `orders` с `mode='PAPER'` |
-| `MICRO_LIVE` | Реальный адаптер; `qty` принудительно = `max(min_qty, notional ≤ micro_live_max_notional)`; **первый ордер после входа в режим** ожидает ручного подтверждения (`tradebot orders approve <id>` или кнопка GUI, подтверждаемая кодом); остальные — автоматически |
+| `MICRO_LIVE` | Реальный адаптер; `qty` принудительно = `max(min_qty, notional ≤ micro_live_max_notional)`; **первый ордер после входа в режим** ожидает ручного подтверждения (`janus orders approve <id>` или кнопка GUI, подтверждаемая кодом); остальные — автоматически |
 | `FULL_AUTO` | Реальный адаптер; автоматическое исполнение в пределах `RiskLimits` |
 
 При старте процесса режим восстанавливается из `mode_state`, но **не выше** `settings.trading_mode`; если конфиг ниже сохранённого — понижение с записью в аудит.
@@ -1131,7 +1166,7 @@ class ModeController:
 | R1 | `mode_allows_trading` | режим ∈ {PAPER, MICRO_LIVE, FULL_AUTO} | ModeController |
 | R2 | `circuit_breaker_armed` | `cb_state.state == ARMED` | CircuitBreaker |
 | R3 | `signal_ttl` | `now_utc < sig.expires_at` | SignalReady |
-| R4 | `action_actionable` | `action ≠ HOLD` | SignalReady |
+| R4 | `action_actionable` | `action ∉ {HOLD, NO_SIGNAL}` | SignalReady |
 | R5 | `no_unknown_orders` | нет ордеров в `UNKNOWN` по символу | orders |
 | R6 | `market_open` | `market_status == OPEN`, не halt | adapter.market_status |
 | R7 | `abnormal_volatility` | `|z(ATR или return)| < volatility_halt_zscore` | Data Layer |
@@ -1147,9 +1182,9 @@ class ModeController:
 | R17 | `duplicate_intent` | нет активного ордера с тем же направлением по тому же сигналу | orders |
 | R18 | `micro_live_cap` | в MICRO_LIVE notional ≤ `micro_live_max_notional` | config |
 
-Флаги могут **уменьшать** размер: `soft_flags` (напр. `news_mixed`, `high_vol`) → `sized_qty × risk_flag_multiplier` (по умолчанию 0.5) `[ДОПУЩЕНИЕ]`.
+Флаги могут **уменьшать** размер: `soft_flags` (напр. `news_mixed`, `high_vol`) → `sized_qty × risk_flag_multiplier` (по умолчанию 0.5) `[ДОПУЩЕНИЕ]`. Такой вердикт записывается как `decision_audit.risk_verdict='REDUCED'`; без уменьшения — `'APPROVED'`.
 
-При провале любого чека: `RiskVerdict.approved=False`, `signals.status='REJECTED'`, `decision_audit.risk_verdict='REJECTED'` с полным `risk_checks_json`, `audit_log: RISK_REJECTED`.
+При провале любого чека: `RiskVerdict.approved=False`, `signals.status='REJECTED'`, `decision_audit.risk_verdict='REJECTED'`, `audit_log: RISK_REJECTED` с полным списком `CheckResult` в `payload_json`.
 
 Пример `RiskVerdict`:
 
@@ -1229,7 +1264,7 @@ class Reconciler:
 
 **Реконнекты:** при восстановлении соединения — сначала `Reconciler.run()`, затем подписки; ордера, отправленные в момент обрыва, переводятся в `UNKNOWN` до сверки.
 
-**Логирование:** каждый переход → `orders` (UPDATE с `version+1`) + `audit_log` (`ORDER_UPDATED`) + `decision_audit.execution_result`.
+**Логирование:** каждый переход → `orders` (UPDATE с `version+1`) + `audit_log` (`ORDER_UPDATED`). `decision_audit.execution_result` заполняется один раз (`VERSIONING.md` §6.2, шаг 4).
 
 ### 7.4. Circuit breaker и kill switch
 
@@ -1271,13 +1306,13 @@ class KillSwitch:
 
 Для триггера Fusion: детали того, *что* считается невалидным семантически, — `[→ FUSION SPEC]`; CircuitBreaker считает по `fused_signals.valid` и по событию `FusionInvalid`. `[ДОПУЩЕНИЕ]` Мягкая реакция до CB: после 3 invalid подряд Signal Engine сам переходит в ML-disabled на `fusion.cooldown_s` (300 с).
 
-Kill switch доступен: CLI `tradebot kill-switch --flatten`, GUI (кнопка + ввод кода), опционально Telegram-команда `/kill` с проверкой chat_id `[ДОПУЩЕНИЕ]`. Kill switch **не требует** кода подтверждения на включение (скорость важнее), только на сброс.
+Kill switch доступен: CLI `janus kill-switch --flatten`, GUI (кнопка + ввод кода), опционально Telegram-команда `/kill` с проверкой chat_id `[ДОПУЩЕНИЕ]`. Kill switch **не требует** кода подтверждения на включение (скорость важнее), только на сброс.
 
-После срабатывания: `tradebot cb reset --confirm` → режим `PAPER` → эскалация заново через `mode set`.
+После срабатывания: `janus cb reset --confirm` → режим `PAPER` → эскалация заново через `mode set`.
 
 ### 7.5. Аудит и воспроизводимость
 
-Для каждого авто-ордера в `decision_audit` есть: `signal_id`, `fused_signal_id`, `risk_verdict` + `risk_checks_json`, `order_id`, `execution_result`, `config_hash`, `mode`.
+Для каждого авто-ордера в `decision_audit` есть: `signal_id`, `fused_signal_id`, `app_version`, `strategy_version`, `ml_model_version`, `llm_prompt_version`, `risk_verdict`, `execution_result` (схема — `VERSIONING.md` §6.1).
 
 Цепочка воспроизведения:
 
@@ -1285,7 +1320,7 @@ Kill switch доступен: CLI `tradebot kill-switch --flatten`, GUI (кно�
 ohlcv (data_hash) ─▶ signals[kind=strategy] (strategy@version, params_hash, bar_ts)
                  ─▶ fused_signals (fusion_request_id → [→ FUSION SPEC] ml_predictions/llm_calls)
                  ─▶ signals[kind=final] (source, risk_flags, expires_ts)
-                 ─▶ decision_audit (risk_checks_json)
+                 ─▶ decision_audit (версии, risk_verdict)
                  ─▶ orders ─▶ fills ─▶ positions
 ```
 
@@ -1299,7 +1334,7 @@ class ReplayService:
         Возвращает расхождения. Ожидание: пустой diff при совпадающих code_version и config_hash."""
 ```
 
-CLI: `tradebot audit explain <signal_id>`, `tradebot audit replay <signal_id>`, `tradebot audit verify-chain` (проверка hash-chain `audit_log`).
+CLI: `janus audit explain <signal_id>`, `janus audit replay <signal_id>`, `janus audit verify-chain` (проверка hash-chain `audit_log`).
 
 ---
 
@@ -1425,28 +1460,30 @@ API по умолчанию слушает `127.0.0.1`. Доступ извне 
 
 ### 9.2. CLI (Typer)
 
+Имя команды — `janus`, точка входа — `janus.interfaces.cli.main:app` (`[project.scripts]` в `pyproject.toml`).
+
 ```
-tradebot run [--mode-check]                      # запуск оркестратора
-tradebot backtest --strategy sma_cross --symbol BTC/USDT --tf 1h --from 2024-01-01 --to 2025-01-01 [--params params.json]
-tradebot signals list [--symbol] [--since]
-tradebot signals explain <signal_id>
-tradebot news fetch|list [--symbol]
-tradebot config validate                         # проверка .env/конфига для текущего режима
-tradebot mode show
-tradebot mode set <MODE> --confirm               # запрос + ввод одноразового кода
-tradebot auto-trade enable                       # = mode set PAPER→... по шагам; алиас
-tradebot auto-trade disable                      # downgrade до SIGNAL_ONLY
-tradebot orders list|cancel <id>|approve <id>
-tradebot kill-switch [--flatten/--no-flatten]
-tradebot cb status|reset --confirm
-tradebot audit explain|replay <signal_id> | verify-chain
-tradebot db migrate|backup
-tradebot data backfill --symbol --tf --days
+janus run [--mode-check]                         # запуск оркестратора
+janus backtest --strategy sma_cross --symbol BTC/USDT --tf 1h --from 2024-01-01 --to 2025-01-01 [--params params.json]
+janus signals list [--symbol] [--since]
+janus signals explain <signal_id>
+janus news fetch|list [--symbol]
+janus config validate                            # проверка .env/конфига для текущего режима
+janus mode show
+janus mode set <MODE> --confirm                  # запрос + ввод одноразового кода
+janus auto-trade enable                          # = mode set PAPER→... по шагам; алиас
+janus auto-trade disable                         # downgrade до SIGNAL_ONLY
+janus orders list|cancel <id>|approve <id>
+janus kill-switch [--flatten/--no-flatten]
+janus cb status|reset --confirm
+janus audit explain|replay <signal_id> | verify-chain
+janus db migrate|backup
+janus data backfill --symbol --tf --days
 ```
 
 ### 9.3. Общие DTO
 
-Пакет `src/interfaces/dto.py` — единственный источник моделей для GUI и CLI: `StatusDTO`, `SignalDTO`, `DecisionChainDTO`, `OrderDTO`, `PositionDTO`, `PortfolioSnapshotDTO`, `BacktestRequestDTO`, `BacktestResultDTO`, `NewsDTO`, `ModeChangeRequestDTO`, `KillSwitchRequestDTO`. CLI использует сервисный слой напрямую (in-process) либо HTTP-клиент к запущенному процессу (`--remote`) — с теми же DTO.
+Пакет `src/janus/interfaces/dto.py` — единственный источник моделей для GUI и CLI: `StatusDTO`, `SignalDTO`, `DecisionChainDTO`, `OrderDTO`, `PositionDTO`, `PortfolioSnapshotDTO`, `BacktestRequestDTO`, `BacktestResultDTO`, `NewsDTO`, `ModeChangeRequestDTO`, `KillSwitchRequestDTO`. CLI использует сервисный слой напрямую (in-process) либо HTTP-клиент к запущенному процессу (`--remote`) — с теми же DTO.
 
 ---
 
@@ -1455,7 +1492,7 @@ tradebot data backfill --symbol --tf --days
 | Область | Требование |
 |---|---|
 | Секреты | Только `.env`/переменные окружения/OS keyring; `.env` в `.gitignore`; `SecretStr`; pre-commit `gitleaks` |
-| Ключи биржи | Создаются с правами **trade-only, без вывода средств**, с IP-whitelist; доступны только `src/execution` и `src/adapters` (контракт `import-linter`: Settings с ключами передаётся адаптеру при сборке в composition root) |
+| Ключи биржи | Создаются с правами **trade-only, без вывода средств**, с IP-whitelist; доступны только `src/janus/execution` и `src/janus/adapters` (контракт `import-linter`: Settings с ключами передаётся адаптеру при сборке в composition root) |
 | LLM | В промпты/ответы не попадают ключи, `client_order_id`, балансы счёта сверх необходимого `[→ FUSION SPEC]` для деталей; Fusion-процесс не получает ключи бирж |
 | Валидация | Все входящие данные (адаптеры, новости, Fusion, API) — Pydantic с `extra="forbid"` там, где формат наш |
 | API | Bearer-токен, bind на localhost, rate limit, CORS выключен, подтверждение опасных действий кодом |
@@ -1471,7 +1508,7 @@ tradebot data backfill --symbol --tf --days
 ## 11. Структура проекта
 
 ```
-tradebot/
+janus/
 ├── pyproject.toml                 # uv/hatch, ruff, mypy --strict, pytest, import-linter
 ├── .env.example                   # все переменные БЕЗ значений
 ├── AGENTS.md                      # правила для Codex
@@ -1484,7 +1521,7 @@ tradebot/
 ├── docs/
 │   ├── TRADING_SYSTEM_SPEC.md     # этот документ
 │   └── ML_LLM_FUSION_SPEC.md
-├── src/tradebot/
+├── src/janus/
 │   ├── config/        settings.py, hashing.py
 │   ├── db/            connection.py, writer.py, migrations/0001_core.sql, 0002_fusion_contract.sql, repositories/
 │   ├── data/          models.py, service.py, normalizer.py, validators.py
@@ -1512,7 +1549,7 @@ tradebot/
     └── e2e/           # сценарии: CB trip, kill switch, duplicate signal, reconnect
 ```
 
-> `src/fusion/` — **тонкий интерфейсный модуль**: только контракт `FusedSignal`/`FusionRequest`, `FusionClient` Protocol, `HttpFusionClient` и `StubFusionClient`. Реализация — по `ML_LLM_FUSION_SPEC.md` (отдельный сервис/пакет).
+> `src/janus/fusion/` — **тонкий интерфейсный модуль**: только контракт `FusedSignal`/`FusionRequest`, `FusionClient` Protocol, `HttpFusionClient` и `StubFusionClient`. Реализация — по `ML_LLM_FUSION_SPEC.md` (отдельный сервис/пакет).
 
 Контракты `import-linter` (фрагмент):
 
@@ -1520,20 +1557,20 @@ tradebot/
 [[tool.importlinter.contracts]]
 name = "Signal Engine does not import ML/LLM"
 type = "forbidden"
-source_modules = ["tradebot.signals", "tradebot.risk", "tradebot.execution", "tradebot.strategies"]
+source_modules = ["janus.signals", "janus.risk", "janus.execution", "janus.strategies"]
 forbidden_modules = ["sklearn", "torch", "lightgbm", "xgboost", "anthropic", "openai", "transformers"]
 
 [[tool.importlinter.contracts]]
 name = "Fusion cannot reach execution"
 type = "forbidden"
-source_modules = ["tradebot.fusion"]
-forbidden_modules = ["tradebot.execution", "tradebot.adapters", "tradebot.risk"]
+source_modules = ["janus.fusion"]
+forbidden_modules = ["janus.execution", "janus.adapters", "janus.risk"]
 
 [[tool.importlinter.contracts]]
 name = "Only risk gate feeds execution"
 type = "forbidden"
-source_modules = ["tradebot.signals", "tradebot.news", "tradebot.strategies"]
-forbidden_modules = ["tradebot.execution"]
+source_modules = ["janus.signals", "janus.news", "janus.strategies"]
+forbidden_modules = ["janus.execution"]
 ```
 
 ---
@@ -1550,21 +1587,21 @@ forbidden_modules = ["tradebot.execution"]
 ### 12.2. CLAUDE.md / AGENTS.md (общее содержимое)
 
 ```markdown
-# Project rules (tradebot)
+# Project rules (janus)
 
 ## Commands
 - Install: `uv sync`
 - Check everything: `make check`  (ruff, mypy --strict, lint-imports, pytest)
-- Run paper: `uv run tradebot run` with TRADING_MODE=PAPER
+- Run paper: `uv run janus run` with TRADING_MODE=PAPER
 - Never run with MICRO_LIVE/FULL_AUTO in agent sessions.
 
 ## Architecture invariants (MUST)
 1. Every order goes Signal Engine → RiskGate.evaluate() → OrderManager. No other path.
-   Never call adapter.place_order() outside src/tradebot/execution.
+   Never call adapter.place_order() outside src/janus/execution.
 2. Do not weaken, skip, reorder or mock-out risk checks in non-test code.
    Changing RiskLimits defaults requires an explicit task statement.
 3. ML/LLM logic lives ONLY in the Fusion implementation (ML_LLM_FUSION_SPEC.md).
-   In this repo src/tradebot/fusion contains contract + stub only.
+   In this repo src/janus/fusion contains contract + stub only.
    Do not import sklearn/torch/anthropic/openai anywhere else (import-linter enforces).
 4. Money = Decimal. Time = UTC-aware datetime. IDs = ULID.
 5. Secrets only via Settings/SecretStr from env. Never print, log or hardcode keys.
@@ -1572,7 +1609,7 @@ forbidden_modules = ["tradebot.execution"]
 7. audit_log is append-only.
 
 ## Skills (MUST use)
-- Before editing src/tradebot/risk or src/tradebot/execution: load `auto-trade-risk-gate`.
+- Before editing src/janus/risk or src/janus/execution: load `auto-trade-risk-gate`.
 - Before editing Fusion implementation: load `hybrid-ml-llm-fusion` (from ML_LLM_FUSION_SPEC).
 - Strategy exits: `exit-strategies`; slippage/costs: `slippage-modeling`.
 
@@ -1590,7 +1627,7 @@ forbidden_modules = ["tradebot.execution"]
 | CODEOWNERS на `risk/`, `execution/`, `migrations/`, `CLAUDE.md`, `AGENTS.md` | изменения требуют ревью человека |
 | Golden-тесты Risk Gate | таблица (вход → вердикт); изменение вердиктов = падение тестов |
 | PR-шаблон с чекбоксом «skill auto-trade-risk-gate использован» + ссылка на чек-лист | процессный контроль |
-| Hook Claude Code `PreToolUse` на Edit/Write в `src/tradebot/{risk,execution}` | напоминание/блок, если skill не загружен `[ДОПУЩЕНИЕ: реализуется скриптом в .claude/settings.json]` |
+| Hook Claude Code `PreToolUse` на Edit/Write в `src/janus/{risk,execution}` | напоминание/блок, если skill не загружен `[ДОПУЩЕНИЕ: реализуется скриптом в .claude/settings.json]` |
 
 ---
 
@@ -1637,7 +1674,7 @@ Skills `hybrid-ml-llm-fusion` и `llm-output-validation` — в `ML_LLM_FUSION_S
 ```markdown
 ---
 name: auto-trade-risk-gate
-description: Use BEFORE creating or changing anything in src/tradebot/risk or src/tradebot/execution
+description: Use BEFORE creating or changing anything in src/janus/risk or src/janus/execution
   (pre-trade checks, position sizing, order state machine, idempotency, circuit breaker, kill switch,
   trading modes). Enforces the invariants of TRADING_SYSTEM_SPEC.md sections 7.1–7.5.
 ---
@@ -1666,7 +1703,7 @@ description: Use BEFORE creating or changing anything in src/tradebot/risk or sr
 5. In the PR description list which invariants were touched and why.
 
 ## Forbidden
-- Calling adapter.place_order/cancel_order outside src/tradebot/execution.
+- Calling adapter.place_order/cancel_order outside src/janus/execution.
 - Flags or config options that disable checks in MICRO_LIVE/FULL_AUTO.
 - try/except that swallows a failed check and approves.
 - Importing ML/LLM libraries.
@@ -1678,7 +1715,7 @@ description: Use BEFORE creating or changing anything in src/tradebot/risk or sr
 |---|---|
 | Любые изменения в `risk/`, `execution/`, режимах, CB, kill switch | `auto-trade-risk-gate` |
 | Fusion-реализация (отдельный пакет) | `hybrid-ml-llm-fusion`, `llm-output-validation` `[→ FUSION SPEC]` |
-| Контракт `src/fusion/contract.py` | `auto-trade-risk-gate` (раздел про ужесточение) + сверка с `ML_LLM_FUSION_SPEC.md` |
+| Контракт `src/janus/fusion/contract.py` | `auto-trade-risk-gate` (раздел про ужесточение) + сверка с `ML_LLM_FUSION_SPEC.md` |
 | Стратегии | `exit-strategies` |
 | Бэктест/издержки | `slippage-modeling`, `trade-journal` |
 | Чеки спреда/ликвидности | `market-microstructure` + `auto-trade-risk-gate` |

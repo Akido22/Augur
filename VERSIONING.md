@@ -143,7 +143,7 @@ CREATE TABLE artifacts (
 
 [Keep a Changelog 1.1.0](https://keepachangelog.com/ru/1.1.0/), на русском.
 
-- Вверху всегда секция `## [Не выпущено]`.
+- Вверху всегда секция `## [Unreleased]`.
 - Секции релизов: `## [X.Y.Z] — YYYY-MM-DD`, от новых к старым.
 - Сразу под заголовком релиза — строка `**Компоненты:**` с версиями, изменившимися в релизе.
 - Разделы строго в этом порядке, пустые не пишутся:
@@ -162,8 +162,8 @@ CREATE TABLE artifacts (
 
 ### 3.2 Правило времени записи
 
-- Запись в CHANGELOG делается **в том же PR**, что и изменение (в секцию `[Не выпущено]`), — до мержа в `develop`.
-- Release-PR в `main` переносит `[Не выпущено]` в секцию `[X.Y.Z]`. Мерж в `main` без секции новой версии **блокируется CI** (§7.4).
+- Запись в CHANGELOG делается **в том же PR**, что и изменение (в секцию `[Unreleased]`), — до мержа в `develop`.
+- Release-PR в `main` переносит `[Unreleased]` в секцию `[X.Y.Z]`. Мерж в `main` без секции новой версии **блокируется CI** (§7.4).
 - Изменения без влияния на поведение (`docs:`, `test:`, `ci:`, рефакторинг) — не записываются.
 - Смена активного артефакта в боевом конфиге — запись в `Изменено`.
 
@@ -368,13 +368,13 @@ WHERE d.id = 1907;
 | Ветка | От | Мерж в | Назначение |
 |---|---|---|---|
 | `main` | — | — | Только релизы. Каждый коммит = тег `vX.Y.Z`. Прямые пуши запрещены |
-| `develop` | `main` | `main` (release-PR) | Интеграция. Секция `[Не выпущено]` в CHANGELOG |
+| `develop` | `main` | `main` (release-PR) | Интеграция. Секция `[Unreleased]` в CHANGELOG |
 | `feature/<scope>-<кратко>` | `develop` | `develop` | Фичи, MINOR-изменения |
 | `hotfix/<X.Y.Z>-<кратко>` | `main` | `main` + `develop` | Только PATCH |
 
 Релизный цикл:
 
-1. Release-PR `develop → main`: bump версии в `pyproject.toml`, перенос `[Не выпущено]` → `[X.Y.Z]`, коммит `chore(release): X.Y.Z`.
+1. Release-PR `develop → main`: bump версии в `pyproject.toml`, перенос `[Unreleased]` → `[X.Y.Z]`, коммит `chore(release): X.Y.Z`.
 2. После мержа — annotated tag на merge-коммит в `main`.
 3. Мерж `main` обратно в `develop`.
 
@@ -554,13 +554,13 @@ description: Версионирование и релизы Janus. Исполь�
    | Контракт Fusion | обновить `FUSION_API_VERSION` и спецификацию |
    | Формат конфига | `CONFIG_VERSION += 1`, мигратор конфига N-1 → N |
    | Новая версия артефакта | новый файл `<имя>_v<N+1>`, регистрация в `artifacts` с sha256 |
-2. Добавь запись в `## [Не выпущено]` CHANGELOG.md в том же коммите/PR.
+2. Добавь запись в `## [Unreleased]` CHANGELOG.md в том же коммите/PR.
 3. Запусти `pytest`, проверку миграций с нуля и на копии БД.
 
 ## Процедура релиза (develop → main)
 1. Определи версию: есть BREAKING или `feat` → MINOR; только `fix` → PATCH (только из hotfix/*).
 2. Обнови `[project].version` в `pyproject.toml`.
-3. Перенеси `[Не выпущено]` → `## [X.Y.Z] — YYYY-MM-DD`, добавь строку `**Компоненты:**`, обнови ссылки сравнения внизу.
+3. Перенеси `[Unreleased]` → `## [X.Y.Z] — YYYY-MM-DD`, добавь строку `**Компоненты:**`, обнови ссылки сравнения внизу.
 4. Коммит: `chore(release): X.Y.Z`. Открой PR в main. Жди подтверждения человека.
 5. После мержа: `git tag -a vX.Y.Z -m "<тело по шаблону>"` на merge-коммит, `git push origin vX.Y.Z`.
 6. Смержи main обратно в develop.
@@ -578,7 +578,7 @@ janus doctor
 - `migrations/0004_orders_client_id.sql`, `-- compat: expand`
 - `EXPECTED_DB_SCHEMA = 4`
 - Коммит: `feat(db): добавить client_order_id в orders`
-- CHANGELOG `[Не выпущено]` → «Добавлено»: «Колонка `orders.client_order_id` для идемпотентной отправки ордеров (db_schema_version 4).»
+- CHANGELOG `[Unreleased]` → «Добавлено»: «Колонка `orders.client_order_id` для идемпотентной отправки ордеров (db_schema_version 4).»
 
 ## Anti-patterns
 - Версия в `pyproject.toml`, `__init__.py` и теге расходится → единственный источник — pyproject.toml.
@@ -603,7 +603,7 @@ janus doctor
 Все значимые изменения проекта Janus. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/), правила — `VERSIONING.md`.
 
-## [Не выпущено]
+## [Unreleased]
 
 ### Добавлено
 - Интерфейс `Strategy` и реестр стратегий.
@@ -629,7 +629,7 @@ janus doctor
 ### Безопасность
 - Ключи адаптеров маскируются в логах.
 
-[Не выпущено]: https://github.com/<org>/janus/compare/v0.2.0...develop
+[Unreleased]: https://github.com/<org>/janus/compare/v0.2.0...develop
 [0.2.0]: https://github.com/<org>/janus/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/<org>/janus/releases/tag/v0.1.0
 ```
@@ -649,7 +649,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-janus = "janus.cli:main"
+janus = "janus.interfaces.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/janus"]
@@ -707,7 +707,7 @@ git show v0.2.0 --no-patch  # тело аннотации, автор, дата
 - [ ] Ветка релиза — `develop` (MINOR) или `hotfix/*` (PATCH); тип изменений соответствует версии (§5).
 - [ ] `[project].version` в `pyproject.toml` обновлена; литералов версии в `src/` нет.
 - [ ] `janus.__version__` после установки совпадает с `pyproject.toml`.
-- [ ] Секция `[Не выпущено]` перенесена в `## [X.Y.Z] — YYYY-MM-DD`; ссылки сравнения обновлены.
+- [ ] Секция `[Unreleased]` перенесена в `## [X.Y.Z] — YYYY-MM-DD`; ссылки сравнения обновлены.
 - [ ] Строка `**Компоненты:**` отражает все изменившиеся версии.
 - [ ] Каждое ломающее изменение помечено `**BREAKING:**` и содержит путь миграции.
 - [ ] Новые миграции имеют `-- compat: expand|contract`; `EXPECTED_DB_SCHEMA` обновлён; checksum применённых миграций не изменились.

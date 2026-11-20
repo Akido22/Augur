@@ -57,11 +57,12 @@ janus kill-switch           # аварийная остановка торгов
 
 | Skill | Когда использовать |
 |---|---|
-| `ml-model` | обучение, инференс, регистрация модели в `ml_models`, запись в `ml_predictions` |
-| `llm-client` | клиенты LLM, промпты, Pydantic-схемы ответов, запись в `llm_calls` |
-| `fusion` | логика `fused_signal`, variance filter, веса ML/LLM |
-| `risk-gate` | лимиты, размер позиции, kill-switch, проверки перед Execution |
-| `release` | bump версии, CHANGELOG, annotated tag |
+| `hybrid-ml-llm-fusion` | логика `fused_signal`, variance filter, веса ML/LLM |
+| `llm-output-validation` | клиенты LLM, промпты, Pydantic-схемы ответов, запись в `llm_calls` |
+| `auto-trade-risk-gate` | лимиты, размер позиции, kill-switch, проверки перед Execution |
+| `release-management` | bump версии, CHANGELOG, annotated tag |
+
+Для ML-обучения и инференса отдельный skill будет создан перед 0.10.0.
 
 Если нужного skill нет в `.claude/skills/` — остановись и сообщи, не пиши код «по памяти».
 

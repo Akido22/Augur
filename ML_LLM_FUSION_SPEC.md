@@ -635,7 +635,7 @@ def aggregate_samples(samples: list[LLMContext], cfg: VarianceCfg) -> LLMContext
 
 ### 5.5 Audit
 
-Для каждого `fused_signal`, включая HOLD и NO\_SIGNAL, в `decision_audit` пишутся: `ml_model_version`, `ml_prediction_id`, `llm_call_ids` (все сэмплы), статус LLM, `fusion_config_version`, сработавшие правила, `risk_verdict` (вместе с причиной отказа), `execution_result`. По этим данным любое решение должно воспроизводиться офлайн: `replay(decision_id)` вызывает `fuse()` на сохранённых входах и сравнивает результат с записанным. Недетерминированная часть (LLM) воспроизводится по сохранённому `response_json`, а не повторным вызовом.
+Для каждого `fused_signal`, включая HOLD и NO\_SIGNAL, в `decision_audit` пишутся `app_version`, `strategy_version`, `ml_model_version`, `llm_prompt_version`, `risk_verdict` и `execution_result` (схема — `VERSIONING.md` §6.1). `llm_call_ids` (все сэмплы), `fusion_config_version` и сработавшие правила хранятся в `fused_signals` (`source_breakdown_json`, `fusion_config_version`). По этим данным любое решение должно воспроизводиться офлайн: `replay(decision_id)` вызывает `fuse()` на сохранённых входах и сравнивает результат с записанным. Недетерминированная часть (LLM) воспроизводится по сохранённому `response_json`, а не повторным вызовом.
 
 ## 6. Интеграция с остальной системой
 
@@ -652,8 +652,8 @@ def aggregate_samples(samples: list[LLMContext], cfg: VarianceCfg) -> LLMContext
 
 1. Data Layer публикует `BarClosed`.
 2. Параллельно: ML-инференс (цель p95 < 200 мс), расчёт tech-сигнала и чтение последнего валидного `LLMContext` из кэша. LLM не вызывается синхронно на критическом пути: контекст обновляется асинхронно по событиям и расписанию.
-3. `fuse()` → `FusedSignal`, запись в `decision_audit` (risk\_verdict = pending).
-4. Risk Gate: проверка TTL (`now < expires_at`, иначе reject `expired`), дедупликация по `idempotency_key`, pre-trade checks, расчёт размера → `risk_verdict`.
+3. `fuse()` → `FusedSignal`, запись в `fused_signals`.
+4. Risk Gate: проверка TTL (`now < expires_at`, иначе reject `expired`), дедупликация по `idempotency_key`, pre-trade checks, расчёт размера → `risk_verdict` (`APPROVED` / `REDUCED` / `REJECTED`) → запись в `decision_audit` (INSERT + COMMIT до отправки ордера, `VERSIONING.md` §6.2).
 5. Режим `paper` / `manual_confirm` / `auto` \[Д7\]: в `manual_confirm` сигнал ждёт подтверждения, но не дольше TTL.
 6. Execution отправляет ордер с `client_order_id = idempotency_key[:32]`. Повторная отправка с тем же id биржа отклонит или вернёт существующий ордер.
 7. `ExecutionReport` → `decision_audit.execution_result`, `orders`, `positions`.
@@ -674,7 +674,7 @@ def aggregate_samples(samples: list[LLMContext], cfg: VarianceCfg) -> LLMContext
 
 ## 7. Таблицы SQLite
 
-Обязательные поля из задания сохранены как есть. Поля с комментарием `-- ext` — предлагаемые расширения, без которых не работают разделы 2–6 (registry, grounding, replay). Таблица `fused_signals` — допущение **\[Д9\]**: `decision_audit.signal_id` должен на что-то ссылаться; если в общей схеме уже есть `signals`, используется она.
+Обязательные поля из задания сохранены как есть. Поля с комментарием `-- ext` — предлагаемые расширения, без которых не работают разделы 2–6 (registry, grounding, replay). Таблица `fused_signals` — допущение **\[Д9\]**: на неё ссылается `decision_audit.fused_signal_id`; `decision_audit.signal_id` ссылается на `signals` общей схемы.
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -764,30 +764,39 @@ CREATE TABLE IF NOT EXISTS fused_signals (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS ix_fused_asset_ts ON fused_signals(asset, timestamp);
 
--- Аудит решений ----------------------------------------------------------
-CREATE TABLE IF NOT EXISTS decision_audit (
-    id                INTEGER PRIMARY KEY,
-    signal_id         INTEGER NOT NULL UNIQUE REFERENCES fused_signals(id),
-    ml_score          REAL,
-    llm_context_json  TEXT CHECK (llm_context_json IS NULL OR json_valid(llm_context_json)),
-    fusion_score      REAL    NOT NULL,
-    risk_verdict      TEXT    NOT NULL DEFAULT 'pending'
-                      CHECK (risk_verdict IN ('pending','approved','rejected','expired','skipped')),
-    execution_result  TEXT CHECK (execution_result IS NULL OR json_valid(execution_result)),
-    ml_prediction_id  INTEGER REFERENCES ml_predictions(id),    -- ext
-    ml_model_version  TEXT,                                      -- ext
-    llm_call_ids_json TEXT CHECK (llm_call_ids_json IS NULL OR json_valid(llm_call_ids_json)), -- ext
-    llm_status        TEXT,                                      -- ext: ok | rejected | fallback_ml_only
-    risk_reason       TEXT,                                      -- ext: причина отказа Risk Gate
-    rules_fired_json  TEXT CHECK (rules_fired_json IS NULL OR json_valid(rules_fired_json)), -- ext
-    explanation       TEXT,                                      -- ext: асинхронный LLM explain
-    created_at        INTEGER NOT NULL,                          -- ext
-    updated_at        INTEGER NOT NULL                           -- ext
-) STRICT;
-CREATE INDEX IF NOT EXISTS ix_audit_verdict ON decision_audit(risk_verdict, created_at);
+-- Аудит решений: схема — VERSIONING.md §6.1 (единственный источник истины) ---
+CREATE TABLE decision_audit (
+    id                  INTEGER PRIMARY KEY,
+    signal_id           INTEGER NOT NULL REFERENCES signals(id),
+    fused_signal_id     INTEGER NOT NULL REFERENCES fused_signals(id),
+    app_version         TEXT NOT NULL CHECK (length(app_version) > 0
+                                             AND app_version NOT LIKE '%+unknown'),
+    strategy_version    TEXT NOT NULL CHECK (length(strategy_version) > 0),
+    ml_model_version    TEXT NOT NULL CHECK (length(ml_model_version) > 0),
+    llm_prompt_version  TEXT NOT NULL CHECK (length(llm_prompt_version) > 0),
+    risk_verdict        TEXT NOT NULL CHECK (risk_verdict IN ('APPROVED', 'REDUCED', 'REJECTED')),
+    execution_result    TEXT,               -- JSON; NULL до отправки, заполняется один раз
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Append-only: версии и вердикт неизменяемы, удаление запрещено
+CREATE TRIGGER decision_audit_no_delete BEFORE DELETE ON decision_audit
+BEGIN SELECT RAISE(ABORT, 'decision_audit is append-only'); END;
+
+CREATE TRIGGER decision_audit_immutable BEFORE UPDATE ON decision_audit
+WHEN NEW.signal_id          IS NOT OLD.signal_id
+  OR NEW.fused_signal_id    IS NOT OLD.fused_signal_id
+  OR NEW.app_version        IS NOT OLD.app_version
+  OR NEW.strategy_version   IS NOT OLD.strategy_version
+  OR NEW.ml_model_version   IS NOT OLD.ml_model_version
+  OR NEW.llm_prompt_version IS NOT OLD.llm_prompt_version
+  OR NEW.risk_verdict       IS NOT OLD.risk_verdict
+  OR NEW.created_at         IS NOT OLD.created_at
+  OR OLD.execution_result   IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'decision_audit row is immutable'); END;
 ```
 
-**Примечания.** `STRICT` требует SQLite ≥ 3.37, частичные индексы — ≥ 3.8; в стандартной сборке Python 3.11+ обычно идёт более новая версия, но её стоит проверить через `sqlite3.sqlite_version`. Записи в `decision_audit` — append-only, кроме полей `risk_verdict`, `risk_reason`, `execution_result`, `explanation`, `updated_at`; это закрепляется триггером `BEFORE UPDATE`, который запрещает менять остальные колонки. Очистка `llm_calls.response_json` старше 90 дней — ежедневный job (метаданные вызова остаются).
+**Примечания.** `STRICT` требует SQLite ≥ 3.37, частичные индексы — ≥ 3.8; в стандартной сборке Python 3.11+ обычно идёт более новая версия, но её стоит проверить через `sqlite3.sqlite_version`. Записи в `decision_audit` — append-only; единственное допустимое изменение — однократное заполнение `execution_result` (триггеры выше, `VERSIONING.md` §6.1–6.2). Очистка `llm_calls.response_json` старше 90 дней — ежедневный job (метаданные вызова остаются).
 
 Типовой запрос для контроля бюджета:
 
@@ -977,21 +986,22 @@ description: Use before writing or changing Risk Gate, pre-trade checks, circuit
 5. Лимиты читаются из read-only конфига; код не может их писать. Переключение в auto —
    только CLI-команда человека с записью в audit_log.
 6. client_order_id = idempotency_key[:32]; повтор после таймаута — сначала запрос статуса ордера.
-7. Каждое решение → decision_audit.risk_verdict + risk_reason; каждый отчёт → execution_result.
+7. Каждое решение → decision_audit.risk_verdict (APPROVED / REDUCED / REJECTED), INSERT + COMMIT
+   до отправки ордера; каждый отчёт → execution_result (заполняется один раз).
 8. Стоп-лосс присутствует у каждой позиции (на бирже, если поддерживается) — см. exit-strategies.
 
 ## Тесты
-- Просроченный сигнал → rejected "expired".
+- Просроченный сигнал → REJECTED (причина "expired").
 - Дубль idempotency_key → второй ордер не отправлен.
-- strength = 1.0 при исчерпанном лимите → rejected.
+- strength = 1.0 при исчерпанном лимите → REJECTED.
 - Режим paper → нет сетевых вызовов к бирже (проверяется моком).
-- Брейкер OPEN + EXIT → approved; брейкер OPEN + ENTER → rejected.
+- Брейкер OPEN + EXIT → APPROVED; брейкер OPEN + ENTER → REJECTED.
 
 ## Пример
 ```python
 verdict = risk_gate.evaluate(signal, portfolio=pf, limits=limits, now_ms=now)
-audit.update_verdict(signal.signal_id, verdict.status, verdict.reason)
-if verdict.status == "approved":
+audit.insert(signal, verdict)          # INSERT + COMMIT до отправки (VERSIONING.md §6.2)
+if verdict.status in ("APPROVED", "REDUCED"):
     report = await executor.submit(verdict.order)   # ApprovedOrder only
 ```
 

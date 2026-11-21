@@ -1,6 +1,6 @@
 ---
 name: llm-output-validation
-description: Hallucination defense for every LLM output in Janus - strict Pydantic schema validation with reject-not-repair, multi-sample variance filter, optional adversarial critic, mechanical separation (LLM only proposes TradeProposal, deterministic code decides), budget/latency fallback to ML-only. Use when creating or modifying src/janus/llm/validators.py, src/janus/llm/client.py, prompts, or any code that parses, stores or consumes LLM output. Do NOT use for combining validated LLM context with ML signals (use hybrid-ml-llm-fusion) or for order execution (use auto-trade-risk-gate).
+description: Hallucination defense for every LLM output in Augur - strict Pydantic schema validation with reject-not-repair, multi-sample variance filter, optional adversarial critic, mechanical separation (LLM only proposes TradeProposal, deterministic code decides), budget/latency fallback to ML-only. Use when creating or modifying src/augur/llm/validators.py, src/augur/llm/client.py, prompts, or any code that parses, stores or consumes LLM output. Do NOT use for combining validated LLM context with ML signals (use hybrid-ml-llm-fusion) or for order execution (use auto-trade-risk-gate).
 ---
 
 # llm-output-validation
@@ -8,7 +8,7 @@ description: Hallucination defense for every LLM output in Janus - strict Pydant
 Защита от галлюцинаций LLM. Невалидный выход отбрасывается и никогда не «чинится». LLM только предлагает, решает детерминированный код.
 
 ## When to use
-- Создаёшь или меняешь `src/janus/llm/validators.py`, `src/janus/llm/client.py`, промпты.
+- Создаёшь или меняешь `src/augur/llm/validators.py`, `src/augur/llm/client.py`, промпты.
 - Пишешь код, который парсит, сохраняет в `llm_calls` или передаёт дальше выход LLM.
 - Меняешь бюджеты, таймауты или число сэмплов LLM.
 
@@ -34,7 +34,7 @@ When NOT to use:
 
 ## Examples
 ```python
-# src/janus/llm/validators.py
+# src/augur/llm/validators.py
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 

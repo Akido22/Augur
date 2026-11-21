@@ -783,7 +783,7 @@ CREATE TABLE decision_audit (
     mode                TEXT    NOT NULL CHECK (mode IN ('ANALYSIS_ONLY','SIGNAL_ONLY','PAPER','MICRO_LIVE','FULL_AUTO')),
     execution_result    TEXT,                                -- JSON; NULL до отправки, заполняется один раз
     explanation         TEXT,                                -- асинхронный LLM explain; заполняется один раз
-    created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    created_at          INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))  -- Unix ms UTC
 ) STRICT;
 
 -- Append-only: удаление запрещено; order_id, execution_result, explanation — write-once (NULL → значение);

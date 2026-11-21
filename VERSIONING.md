@@ -1,4 +1,4 @@
-# VERSIONING.md — Политика версионирования Janus
+# VERSIONING.md — Политика версионирования Augur
 
 > Нормативный документ. Обязателен для людей и агентов (Claude Code / Codex).
 > Ключевые слова «ДОЛЖЕН», «ЗАПРЕЩЕНО», «ДОПУСКАЕТСЯ» трактуются буквально.
@@ -55,7 +55,7 @@
 | Носитель | Правило |
 |---|---|
 | `pyproject.toml` → `[project].version` | **Единственный источник истины** |
-| `janus.__version__` | Только через `importlib.metadata.version("janus")`. Строковые литералы версии в коде **ЗАПРЕЩЕНЫ** |
+| `augur.__version__` | Только через `importlib.metadata.version("augur")`. Строковые литералы версии в коде **ЗАПРЕЩЕНЫ** |
 | git tag | Annotated, `vX.Y.Z`, ставится на merge-коммит в `main` |
 
 ### 2.2 Уровень компонентов
@@ -69,7 +69,7 @@
 Константы ожидаемых версий — в одном модуле:
 
 ```python
-# src/janus/versions.py
+# src/augur/versions.py
 FUSION_API_VERSION = "1.0"   # контракт Fusion, который реализует этот код
 EXPECTED_DB_SCHEMA = 3       # схема, которую ожидает этот код
 CONFIG_VERSION = 2           # формат конфига, который читает этот код
@@ -88,8 +88,8 @@ CREATE TABLE schema_migrations (
     name         TEXT    NOT NULL,                  -- 0003_candles_index
     checksum     TEXT    NOT NULL,                  -- sha256 файла миграции
     compat       TEXT    NOT NULL CHECK (compat IN ('expand', 'contract')),
-    app_version  TEXT    NOT NULL,                  -- версия Janus, применившая миграцию
-    applied_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    app_version  TEXT    NOT NULL,                  -- версия Augur, применившая миграцию
+    applied_at   INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))  -- Unix ms UTC
 );
 ```
 
@@ -116,7 +116,7 @@ CREATE TABLE artifacts (
     sha256      TEXT NOT NULL,
     path        TEXT NOT NULL,                     -- artifacts/ml/lightgbm_v3.txt
     metadata    TEXT NOT NULL,                     -- JSON: features, train_range, llm_model, temperature…
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_at  INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),  -- Unix ms UTC
     PRIMARY KEY (kind, version)
 );
 ```
@@ -127,7 +127,7 @@ CREATE TABLE artifacts (
 |---|---|---|---|---|
 | Приложение | `app_version` | `pyproject.toml`; git tag `vX.Y.Z`; CHANGELOG | Release-владелец (агент через skill, подтверждает человек) | В release-PR `develop → main` |
 | Компонент | `api_version` | `versions.py`, спецификация Fusion, поле каждого сигнала | Автор изменения контракта | В PR, меняющем контракт Fusion |
-| Компонент | `db_schema_version` | Таблица `schema_migrations`; `EXPECTED_DB_SCHEMA` | Автор миграции | В PR, добавляющем файл `src/janus/db/migrations/NNNN_*.sql` |
+| Компонент | `db_schema_version` | Таблица `schema_migrations`; `EXPECTED_DB_SCHEMA` | Автор миграции | В PR, добавляющем файл `src/augur/db/migrations/NNNN_*.sql` |
 | Компонент | `config_version` | Корень конфига; `CONFIG_VERSION` | Автор изменения конфига | В PR с несовместимым изменением структуры конфига |
 | Артефакт | `strategy_version` | Реестр `artifacts`, `artifacts/strategies/` | Автор стратегии | При любом изменении кода или параметров стратегии |
 | Артефакт | `ml_model_version` | Реестр `artifacts`, `artifacts/ml/` | Пайплайн обучения (автоматически) | При каждом переобучении / смене признаков |
@@ -175,13 +175,13 @@ CREATE TABLE artifacts (
 **Компоненты:** db_schema_version 1 · config_version 1 · api_version — · артефакты —
 
 ### Добавлено
-- Каркас пакета `janus` (Python 3.11+, src-layout, `pyproject.toml` как единственный источник версии).
-- `janus.__version__` через `importlib.metadata`.
-- Модуль `janus.versions` с ожидаемыми версиями компонентов.
+- Каркас пакета `augur` (Python 3.11+, src-layout, `pyproject.toml` как единственный источник версии).
+- `augur.__version__` через `importlib.metadata`.
+- Модуль `augur.versions` с ожидаемыми версиями компонентов.
 - Мигратор SQLite: таблица `schema_migrations` с checksum и флагом совместимости, авто-бэкап перед миграцией.
 - Миграция `0001_core`: служебные таблицы `schema_migrations`, `artifacts`.
 - Загрузчик конфига с проверкой `config_version`.
-- CLI-команда `janus --version` — выводит версии приложения, схемы БД, конфига.
+- CLI-команда `augur --version` — выводит версии приложения, схемы БД, конфига.
 - Структурированное логирование (JSON), версия приложения в каждой записи.
 - CI: линтер, типизация, тесты, проверка совпадения версии `pyproject.toml` и git-тега.
 - Документы: `VERSIONING.md`, `CHANGELOG.md`, skill `release-management`.
@@ -196,7 +196,7 @@ CREATE TABLE artifacts (
 
 | Версия | Этап | Готово (критерий релиза) | Компоненты / артефакты, которые растут |
 |---|---|---|---|
-| **0.1.0** | Каркас | Пакет, CI, мигратор, загрузчик конфига, `janus --version` | `db_schema` → 1; `config` → 1 |
+| **0.1.0** | Каркас | Пакет, CI, мигратор, загрузчик конфига, `augur --version` | `db_schema` → 1; `config` → 1 |
 | **0.2.0** | Data Layer | Хранилище OHLCV/инструментов, адаптеры Forex/крипто/акции (только чтение), идемпотентная загрузка истории | `db_schema` +N (instruments, candles); `config` +1 (источники данных) |
 | **0.3.0** | Стратегии + бэктест | Интерфейс стратегии, реестр, детерминированный бэктест с отчётом, Signal Engine | `db_schema` +N (signals, backtest_runs); первый `strategy_v1` |
 | **0.4.0** | Fusion-контракт | Спецификация и валидация контракта, stub-реализация Fusion, таблица fused_signals | `api_version` → 1.0; `db_schema` +1 |
@@ -225,7 +225,7 @@ CREATE TABLE artifacts (
 ### 5.2 MINOR (`X.Y.Z → X.Y+1.0`)
 
 - Новая функциональность с обратной совместимостью.
-- Любое изменение схемы БД ДОЛЖНО идти через новую миграцию (`src/janus/db/migrations/NNNN_*.sql`) и попадает только в MINOR или MAJOR.
+- Любое изменение схемы БД ДОЛЖНО идти через новую миграцию (`src/augur/db/migrations/NNNN_*.sql`) и попадает только в MINOR или MAJOR.
 - Изменение схемы без миграции (ручной `ALTER`, правка применённой миграции) **ЗАПРЕЩЕНО**.
 
 ### 5.3 BREAKING внутри 0.x
@@ -275,7 +275,7 @@ CREATE TABLE decision_audit (
     mode                TEXT    NOT NULL CHECK (mode IN ('ANALYSIS_ONLY','SIGNAL_ONLY','PAPER','MICRO_LIVE','FULL_AUTO')),
     execution_result    TEXT,                                -- JSON; NULL до отправки, заполняется один раз
     explanation         TEXT,                                -- асинхронный LLM explain; заполняется один раз
-    created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    created_at          INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))  -- Unix ms UTC
 ) STRICT;
 
 -- Append-only: удаление запрещено; order_id, execution_result, explanation — write-once (NULL → значение);
@@ -345,7 +345,7 @@ def assert_auditable(rec: "DecisionAuditRecord") -> None:
 ### 6.3 Пример цепочки
 
 ```text
-Janus 0.10.0                                  app_version
+Augur 0.10.0                                  app_version
  └─ strategy_v2         → signal #8812        strategy_version
      ├─ lightgbm_v3                           ml_model_version
      └─ prompt_news_v1                        llm_prompt_version
@@ -502,7 +502,7 @@ print(f"OK: {version}")
 - Применённая миграция неизменна; checksum проверяется при старте.
 
 ```sql
--- src/janus/db/migrations/0004_orders_client_id.sql
+-- src/augur/db/migrations/0004_orders_client_id.sql
 -- compat: expand
 ALTER TABLE orders ADD COLUMN client_order_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS ix_orders_client_order_id ON orders(client_order_id);
@@ -513,7 +513,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ix_orders_client_order_id ON orders(client_ord
 Мигратор ДОЛЖЕН перед каждой миграцией выполнить:
 
 ```bash
-sqlite3 data/janus.db "VACUUM INTO 'backups/janus_pre_v0.6.0_schema5.db'"
+sqlite3 data/augur.db "VACUUM INTO 'backups/augur_pre_v0.6.0_schema5.db'"
 ```
 
 Бэкапы перед миграциями хранятся не меньше двух MINOR-релизов.
@@ -522,18 +522,18 @@ sqlite3 data/janus.db "VACUUM INTO 'backups/janus_pre_v0.6.0_schema5.db'"
 
 | Шаг | Действие | Команда / проверка |
 |---|---|---|
-| 1 | Остановить новые ордера | `janus exec safe-mode on` (kill switch). Открытые позиции — по runbook, не автоматически |
-| 2 | Снять бэкап текущей БД | `sqlite3 data/janus.db "VACUUM INTO 'backups/janus_pre_rollback_$(date +%Y%m%dT%H%M%S).db'"` |
+| 1 | Остановить новые ордера | `augur exec safe-mode on` (kill switch). Открытые позиции — по runbook, не автоматически |
+| 2 | Снять бэкап текущей БД | `sqlite3 data/augur.db "VACUUM INTO 'backups/augur_pre_rollback_$(date +%Y%m%dT%H%M%S).db'"` |
 | 3 | Откатить код | `git checkout vX.Y.Z` + установка из lock-файла с хешами (`uv sync --frozen` / `pip install --require-hashes -r requirements.lock`) |
 | 4а | Схема: только `expand`-миграции после vX.Y.Z | Ничего не делать: старый код стартует на новой схеме |
-| 4б | Схема: есть `contract`-миграция | Восстановить `backups/janus_pre_vX.Y.Z_*.db`; экспортировать из текущей БД строки append-only таблиц (`orders`, `fills`, `decision_audit`) после момента бэкапа и импортировать скриптом `scripts/reimport_since.py`. Потеря торговых записей недопустима |
+| 4б | Схема: есть `contract`-миграция | Восстановить `backups/augur_pre_vX.Y.Z_*.db`; экспортировать из текущей БД строки append-only таблиц (`orders`, `fills`, `decision_audit`) после момента бэкапа и импортировать скриптом `scripts/reimport_since.py`. Потеря торговых записей недопустима |
 | 5 | Конфиг | Конфиг из тега vX.Y.Z; `config_version` должен совпасть с `CONFIG_VERSION` кода |
 | 6 | Артефакты | Переключить активные указатели в конфиге на прежние версии (`active_model: lightgbm_v2`). Файлы артефактов не удаляются |
-| 7 | Проверка | `janus doctor`: версии приложения, схемы, конфига, хеши активных артефактов — всё зелёное |
+| 7 | Проверка | `augur doctor`: версии приложения, схемы, конфига, хеши активных артефактов — всё зелёное |
 | 8 | Возврат в торговлю | PAPER ≥ 1 торговой сессии → снять safe-mode |
 
 - Откат не переписывает теги и историю. Исправление выпускается новой PATCH/MINOR-версией.
-- Откат только артефакта (модель/промпт) не требует шагов 2–5: переключить указатель → `janus doctor` → PAPER-прогон.
+- Откат только артефакта (модель/промпт) не требует шагов 2–5: переключить указатель → `augur doctor` → PAPER-прогон.
 
 ---
 
@@ -546,10 +546,10 @@ sqlite3 data/janus.db "VACUUM INTO 'backups/janus_pre_v0.6.0_schema5.db'"
 ````markdown
 ---
 name: release-management
-description: Версионирование и релизы Janus. Использовать перед любым коммитом или PR в main, при смене версии приложения, при изменении схемы БД, формата конфига, контракта Fusion, при создании или активации ML-модели, стратегии или LLM-промпта, при создании git-тега и записи в CHANGELOG.md.
+description: Версионирование и релизы Augur. Использовать перед любым коммитом или PR в main, при смене версии приложения, при изменении схемы БД, формата конфига, контракта Fusion, при создании или активации ML-модели, стратегии или LLM-промпта, при создании git-тега и записи в CHANGELOG.md.
 ---
 
-# Release management — Janus
+# Release management — Augur
 
 Источник правил: `VERSIONING.md` в корне репозитория. При конфликте побеждает VERSIONING.md.
 
@@ -566,7 +566,7 @@ description: Версионирование и релизы Janus. Исполь�
    |---|---|
    | Багфикс без схемы БД | `fix:`, запись в «Исправлено» |
    | Новая фича | `feat:`, запись в «Добавлено» |
-   | Изменение схемы БД | новый файл `src/janus/db/migrations/NNNN_<имя>.sql` с `-- compat: expand|contract`, `EXPECTED_DB_SCHEMA += 1` |
+   | Изменение схемы БД | новый файл `src/augur/db/migrations/NNNN_<имя>.sql` с `-- compat: expand|contract`, `EXPECTED_DB_SCHEMA += 1` |
    | `compat: contract`, удаление поля контракта, переименование ключа конфига | `breaking:` / `!`, запись с `**BREAKING:**` + путь миграции |
    | Контракт Fusion | обновить `FUSION_API_VERSION` и спецификацию |
    | Формат конфига | `CONFIG_VERSION += 1`, мигратор конфига N-1 → N |
@@ -584,15 +584,15 @@ description: Версионирование и релизы Janus. Исполь�
 
 ## Проверки перед завершением
 ```bash
-python -c "import janus, tomllib; v=tomllib.load(open('pyproject.toml','rb'))['project']['version']; assert janus.__version__==v, (janus.__version__, v)"
+python -c "import augur, tomllib; v=tomllib.load(open('pyproject.toml','rb'))['project']['version']; assert augur.__version__==v, (augur.__version__, v)"
 grep -rnE '__version__\s*=\s*"' src/ && exit 1 || true
 git cat-file -t vX.Y.Z   # должно вывести: tag
-janus doctor
+augur doctor
 ```
 
 ## Пример
 Задача: «Добавь в orders колонку client_order_id».
-- `src/janus/db/migrations/0004_orders_client_id.sql`, `-- compat: expand`
+- `src/augur/db/migrations/0004_orders_client_id.sql`, `-- compat: expand`
 - `EXPECTED_DB_SCHEMA = 4`
 - Коммит: `feat(db): добавить client_order_id в orders`
 - CHANGELOG `[Unreleased]` → «Добавлено»: «Колонка `orders.client_order_id` для идемпотентной отправки ордеров (db_schema_version 4).»
@@ -617,7 +617,7 @@ janus doctor
 ```markdown
 # Журнал изменений
 
-Все значимые изменения проекта Janus. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
+Все значимые изменения проекта Augur. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/), правила — `VERSIONING.md`.
 
 ## [Unreleased]
@@ -634,21 +634,21 @@ janus doctor
 - Адаптеры только для чтения: OANDA (Forex), Binance spot (крипто), Alpaca (акции).
 - Идемпотентная загрузка истории OHLCV с докачкой пропусков.
 - Нормализация таймфреймов и часовых поясов (хранение в UTC).
-- CLI: `janus data fetch`, `janus data gaps`.
+- CLI: `augur data fetch`, `augur data gaps`.
 
 ### Изменено
 - **BREAKING:** секция конфига `exchanges` переименована в `sources` (config_version 2).
-  Миграция: `janus config migrate` либо ручное переименование ключа.
+  Миграция: `augur config migrate` либо ручное переименование ключа.
 
 ### Исправлено
-- `janus --version` падал при отсутствии файла БД.
+- `augur --version` падал при отсутствии файла БД.
 
 ### Безопасность
 - Ключи адаптеров маскируются в логах.
 
-[Unreleased]: https://github.com/<org>/janus/compare/v0.2.0...develop
-[0.2.0]: https://github.com/<org>/janus/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/<org>/janus/releases/tag/v0.1.0
+[Unreleased]: https://github.com/<org>/augur/compare/v0.2.0...develop
+[0.2.0]: https://github.com/<org>/augur/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/<org>/augur/releases/tag/v0.1.0
 ```
 
 ### 10.2 pyproject.toml с версией из одного источника
@@ -659,25 +659,25 @@ requires = ["hatchling>=1.24"]
 build-backend = "hatchling.build"
 
 [project]
-name = "janus"
+name = "augur"
 version = "0.1.0"                 # ЕДИНСТВЕННОЕ место, где записана версия приложения
 description = "Гибридная торговая система ML+LLM"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-janus = "janus.interfaces.cli.main:app"
+augur = "augur.interfaces.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/janus"]
+packages = ["src/augur"]
 ```
 
 ```python
-# src/janus/__init__.py
+# src/augur/__init__.py
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("janus")
+    __version__ = version("augur")
 except PackageNotFoundError:          # запуск из исходников без `pip install -e .`
     __version__ = "0.0.0+unknown"     # Execution отклоняет ордера с такой версией (§6.2)
 ```
@@ -687,7 +687,7 @@ except PackageNotFoundError:          # запуск из исходников �
 ```bash
 git checkout main && git pull --ff-only
 
-git tag -a v0.2.0 -m "Janus 0.2.0 — Data Layer
+git tag -a v0.2.0 -m "Augur 0.2.0 — Data Layer
 
 Добавлено: хранилище OHLCV, адаптеры OANDA/Binance/Alpaca (read-only),
 идемпотентная загрузка истории.
@@ -723,7 +723,7 @@ git show v0.2.0 --no-patch  # тело аннотации, автор, дата
 
 - [ ] Ветка релиза — `develop` (MINOR) или `hotfix/*` (PATCH); тип изменений соответствует версии (§5).
 - [ ] `[project].version` в `pyproject.toml` обновлена; литералов версии в `src/` нет.
-- [ ] `janus.__version__` после установки совпадает с `pyproject.toml`.
+- [ ] `augur.__version__` после установки совпадает с `pyproject.toml`.
 - [ ] Секция `[Unreleased]` перенесена в `## [X.Y.Z] — YYYY-MM-DD`; ссылки сравнения обновлены.
 - [ ] Строка `**Компоненты:**` отражает все изменившиеся версии.
 - [ ] Каждое ломающее изменение помечено `**BREAKING:**` и содержит путь миграции.
@@ -733,6 +733,6 @@ git show v0.2.0 --no-patch  # тело аннотации, автор, дата
 - [ ] `FUSION_API_VERSION` и спецификация Fusion согласованы.
 - [ ] Все активные артефакты в конфиге зарегистрированы в `artifacts`, хеши совпадают с файлами.
 - [ ] Тест «ордер без полной версии не отправляется» зелёный; replay-тест на эталонных решениях зелёный.
-- [ ] `janus doctor` на стенде PAPER без ошибок.
+- [ ] `augur doctor` на стенде PAPER без ошибок.
 - [ ] Процедура отката для этого релиза определена: `expand`-only или требуется восстановление бэкапа (§8.3).
 - [ ] Человек подтвердил мерж в `main`; после мержа создан annotated-тег `vX.Y.Z`, CI `release-check` зелёный, `main` смержен в `develop`.

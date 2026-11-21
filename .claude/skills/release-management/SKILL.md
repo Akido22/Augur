@@ -1,6 +1,6 @@
 ---
 name: release-management
-description: Release discipline for Janus - SemVer bump, CHANGELOG.md ([Unreleased] → version, BREAKING marks), single version source in pyproject.toml, pytest + ruff gates, annotated git tags, DB migrations with db_schema_version, model/strategy/prompt versioning and rollback. Use before committing to main, before changing the app version, DB schema or the fused_signal contract, and before creating a git tag or rolling back a release. Do NOT use for writing trading, fusion or LLM logic itself (use auto-trade-risk-gate, hybrid-ml-llm-fusion, llm-output-validation).
+description: Release discipline for Augur - SemVer bump, CHANGELOG.md ([Unreleased] → version, BREAKING marks), single version source in pyproject.toml, pytest + ruff gates, annotated git tags, DB migrations with db_schema_version, model/strategy/prompt versioning and rollback. Use before committing to main, before changing the app version, DB schema or the fused_signal contract, and before creating a git tag or rolling back a release. Do NOT use for writing trading, fusion or LLM logic itself (use auto-trade-risk-gate, hybrid-ml-llm-fusion, llm-output-validation).
 ---
 
 # release-management
@@ -23,14 +23,14 @@ When NOT to use:
    - MINOR: новая функциональность с обратной совместимостью;
    - PATCH: исправления.
 3. Обнови `CHANGELOG.md`: перенеси `[Unreleased]` в `[X.Y.Z] - YYYY-MM-DD` с разделами «Добавлено», «Изменено», «Удалено», «Исправлено», «Безопасность». Ломающие пункты помечай **BREAKING** с инструкцией миграции. Затем создай пустой `[Unreleased]`.
-4. Обнови версию только в `pyproject.toml` (`[project].version`). В коде версия читается через `importlib.metadata.version("janus")`.
+4. Обнови версию только в `pyproject.toml` (`[project].version`). В коде версия читается через `importlib.metadata.version("augur")`.
 5. Схема БД изменилась → новая миграция `migrations/NNNN_<name>.sql` (forward и, если возможно, down), `db_schema_version` +1. Миграцию прогоняй на копии рабочей SQLite.
 6. Проверь версии артефактов: новые или изменённые ML-модели (`ml_models.version`), стратегии (`strategy_version`) и промпты (`llm_prompt_version`) имеют явную версию и запись в CHANGELOG.
 7. Прогони гейты. Любой красный результат блокирует релиз:
    - `pytest`
    - `ruff check .`
 8. Закоммить: `chore(release): vX.Y.Z`.
-9. Создай annotated tag: `git tag -a vX.Y.Z -m "Janus vX.Y.Z: <кратко>"`.
+9. Создай annotated tag: `git tag -a vX.Y.Z -m "Augur vX.Y.Z: <кратко>"`.
 10. Сверь версии: pyproject, тег и заголовок CHANGELOG должны совпадать (скрипт ниже).
 11. Rollback: `git checkout vPREV`, down-миграция или восстановление бэкапа БД, сделанного до миграции, затем перезапуск в PAPER. Зафиксируй откат в CHANGELOG (раздел «Исправлено») и в `audit_log`.
 
@@ -49,7 +49,7 @@ When NOT to use:
 
 ```bash
 pytest && ruff check .
-git tag -a v1.4.0 -m "Janus v1.4.0: variance filter, persistent kill switch"
+git tag -a v1.4.0 -m "Augur v1.4.0: variance filter, persistent kill switch"
 ```
 
 ```bash

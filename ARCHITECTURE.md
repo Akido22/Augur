@@ -98,7 +98,7 @@
 
 **Правило переключения (MUST):** режим меняется только при одновременном выполнении трёх условий:
 1. Значение `TRADING_MODE` в конфиге равно целевому режиму (или выше — см. `max_allowed_mode`).
-2. CLI-команда `janus mode set <MODE> --confirm` с вводом одноразового кода подтверждения (для `MICRO_LIVE`/`FULL_AUTO`).
+2. CLI-команда `augur mode set <MODE> --confirm` с вводом одноразового кода подтверждения (для `MICRO_LIVE`/`FULL_AUTO`).
 3. Запись `MODE_CHANGED` в `audit_log` и в `mode_state` прошла успешно (иначе откат).
 
 Понижение режима (например, `FULL_AUTO → PAPER`) разрешено без кода подтверждения. GUI может **инициировать** запрос на смену режима, но подтверждение выполняется через CLI `[ДОПУЩЕНИЕ]` — снижает риск случайного клика и CSRF.
@@ -121,25 +121,25 @@
 
 | Модуль | Пакет | Ответственность | Зависит от |
 |---|---|---|---|
-| Config | `src/janus/config` | Загрузка и валидация настроек, секреты, хеш конфига | — |
-| Data Layer | `src/janus/data` | OHLCV, тики, новости, макро; нормализация; кэш в SQLite | config, db, adapters (read-only) |
-| Market Adapters | `src/janus/adapters` | Унифицированный доступ к MT5 / CCXT / Alpaca / Paper | config |
-| Strategy Framework | `src/janus/strategies` | Классические стратегии, реестр | data (DTO) |
-| Backtest Engine | `src/janus/backtest` | Событийный бэктест, комиссии, проскальзывание, метрики | strategies, data, risk |
-| Signal Engine | `src/janus/signals` | Сбор сигналов стратегий, вызов FusionClient, публикация `signal_ready` | strategies, fusion (контракт) |
-| Fusion (контракт) | `src/janus/fusion` | DTO `FusedSignal`, `FusionClient`, заглушка | — |
-| Risk Engine | `src/janus/risk` | Pre/post-trade лимиты, sizing, Risk Gate | config, db |
-| Execution | `src/janus/execution` | Ордера, позиции, идемпотентность, CB, kill switch, режимы | adapters, risk, db |
-| News & Sentiment | `src/janus/news` | Получение новостей, дедуп, скоринг, `news_event` | config, db |
-| Notification | `src/janus/notify` | Telegram / Email / Webhook | config |
-| Orchestrator | `src/janus/orchestrator` | Event bus, планировщик, жизненный цикл | все |
-| Interfaces | `src/janus/interfaces` | FastAPI + WebSocket, CLI (Typer), общие DTO | orchestrator |
-| DB | `src/janus/db` | Схема, миграции, репозитории, single-writer | — |
+| Config | `src/augur/config` | Загрузка и валидация настроек, секреты, хеш конфига | — |
+| Data Layer | `src/augur/data` | OHLCV, тики, новости, макро; нормализация; кэш в SQLite | config, db, adapters (read-only) |
+| Market Adapters | `src/augur/adapters` | Унифицированный доступ к MT5 / CCXT / Alpaca / Paper | config |
+| Strategy Framework | `src/augur/strategies` | Классические стратегии, реестр | data (DTO) |
+| Backtest Engine | `src/augur/backtest` | Событийный бэктест, комиссии, проскальзывание, метрики | strategies, data, risk |
+| Signal Engine | `src/augur/signals` | Сбор сигналов стратегий, вызов FusionClient, публикация `signal_ready` | strategies, fusion (контракт) |
+| Fusion (контракт) | `src/augur/fusion` | DTO `FusedSignal`, `FusionClient`, заглушка | — |
+| Risk Engine | `src/augur/risk` | Pre/post-trade лимиты, sizing, Risk Gate | config, db |
+| Execution | `src/augur/execution` | Ордера, позиции, идемпотентность, CB, kill switch, режимы | adapters, risk, db |
+| News & Sentiment | `src/augur/news` | Получение новостей, дедуп, скоринг, `news_event` | config, db |
+| Notification | `src/augur/notify` | Telegram / Email / Webhook | config |
+| Orchestrator | `src/augur/orchestrator` | Event bus, планировщик, жизненный цикл | все |
+| Interfaces | `src/augur/interfaces` | FastAPI + WebSocket, CLI (Typer), общие DTO | orchestrator |
+| DB | `src/augur/db` | Схема, миграции, репозитории, single-writer | — |
 
 ### 2.2. Config / Settings
 
 ```python
-# src/janus/config/settings.py
+# src/augur/config/settings.py
 from enum import StrEnum
 from decimal import Decimal
 from pydantic import BaseModel, Field, SecretStr
@@ -175,7 +175,7 @@ class Settings(BaseSettings):
                                       extra="forbid")
     trading_mode: TradingMode = TradingMode.PAPER
     max_allowed_mode: TradingMode = TradingMode.PAPER
-    db_path: str = "data/janus.db"
+    db_path: str = "data/augur.db"
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT"])
     risk: RiskLimits = RiskLimits()
     fusion: FusionSettings = FusionSettings()
@@ -209,7 +209,7 @@ def config_hash(settings: Settings) -> str:
 Ответственность: получение, нормализация, хранение и выдача рыночных данных. Единственный источник данных для стратегий, бэктеста и Fusion-входа.
 
 ```python
-# src/janus/data/models.py
+# src/augur/data/models.py
 class Bar(BaseModel, frozen=True):
     symbol: str            # каноническое имя: "BTC/USDT", "EURUSD", "AAPL"
     venue: str             # "ccxt:binance" | "mt5" | "alpaca"
@@ -222,7 +222,7 @@ class Tick(BaseModel, frozen=True):
     symbol: str; venue: str; ts: datetime
     bid: Decimal; ask: Decimal; last: Decimal | None = None; volume: float | None = None
 
-# src/janus/data/service.py
+# src/augur/data/service.py
 class MarketDataService:
     async def get_bars(self, symbol: str, timeframe: str, start: datetime,
                        end: datetime, *, venue: str | None = None) -> list[Bar]:
@@ -250,7 +250,7 @@ class SymbolNormalizer:
 ### 2.5. Strategy Framework
 
 ```python
-# src/janus/strategies/base.py
+# src/augur/strategies/base.py
 class SignalAction(StrEnum):
     BUY = "BUY"; SELL = "SELL"; CLOSE = "CLOSE"; REDUCE = "REDUCE"
     HOLD = "HOLD"            # решение принято: ничего не делать
@@ -304,7 +304,7 @@ class StrategyRegistry:
 Точка входа для сигналов. **MUST NOT** содержать ML-кода и вызывать LLM.
 
 ```python
-# src/janus/signals/engine.py
+# src/augur/signals/engine.py
 class SignalReady(BaseModel, frozen=True):
     """Событие signal_ready — единственный вход Risk Gate."""
     signal_id: str                       # ULID нового итогового сигнала
@@ -354,7 +354,7 @@ class SignalEngine:
 ### 2.8. Risk Engine
 
 ```python
-# src/janus/risk/gate.py
+# src/augur/risk/gate.py
 class CheckResult(BaseModel, frozen=True):
     name: str                 # "signal_ttl", "daily_loss", ...
     passed: bool
@@ -457,7 +457,7 @@ class Orchestrator:
 - Идентификаторы — ULID (`TEXT`, лексикографически сортируемы по времени).
 - **Single writer:** все записи идут через `DbWriter` — одну asyncio-задачу с очередью; чтение — пул соединений. Это устраняет `database is locked` при конкурентной записи.
 - Идемпотентная вставка: `INSERT ... ON CONFLICT(<natural key>) DO NOTHING` или `DO UPDATE` по явному правилу.
-- Миграции — нумерованные SQL-файлы `src/janus/db/migrations/NNNN_name.sql`, таблица `schema_migrations` (DDL и правила — `VERSIONING.md` §2.2, §8).
+- Миграции — нумерованные SQL-файлы `src/augur/db/migrations/NNNN_name.sql`, таблица `schema_migrations` (DDL и правила — `VERSIONING.md` §2.2, §8).
 - `audit_log` — append-only: триггеры запрещают `UPDATE`/`DELETE`.
 
 ### 3.2. DDL основных таблиц
@@ -677,7 +677,7 @@ CREATE TABLE decision_audit (
     mode                TEXT    NOT NULL CHECK (mode IN ('ANALYSIS_ONLY','SIGNAL_ONLY','PAPER','MICRO_LIVE','FULL_AUTO')),
     execution_result    TEXT,                                -- JSON; NULL до отправки, заполняется один раз
     explanation         TEXT,                                -- асинхронный LLM explain; заполняется один раз
-    created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    created_at          INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))  -- Unix ms UTC
 ) STRICT;
 
 -- Append-only: удаление запрещено; order_id, execution_result, explanation — write-once (NULL → значение);
@@ -748,7 +748,7 @@ class AuditRepository:
 ### 4.1. Унифицированный протокол адаптера
 
 ```python
-# src/janus/adapters/base.py
+# src/augur/adapters/base.py
 class OrderRequest(BaseModel, frozen=True):
     client_order_id: str
     symbol: str                 # каноническое имя
@@ -986,7 +986,7 @@ Alpaca нативно поддерживает `client_order_id` — этало�
 ### 5.4. Python-контракт
 
 ```python
-# src/janus/fusion/contract.py
+# src/augur/fusion/contract.py
 FUSION_CONTRACT_VERSION = "fused_signal/1.0"
 
 class FusedSignal(BaseModel, frozen=True):
@@ -1056,7 +1056,7 @@ async def resolve_signal(self, strat_signals, ctx) -> SignalReady:
 Нормативно:
 1. Signal Engine **MUST NOT** импортировать ML-библиотеки (`sklearn`, `torch`, `lightgbm`, …) и LLM SDK (`anthropic`, `openai`, …). Проверка — `import-linter` + CI-grep.
 2. Если Fusion недоступен/невалиден → режим **ML-disabled** (только классика) + `WARN` в `audit_log`.
-3. `fused_signal` **MUST** пройти Risk Gate. Ни один путь кода не ведёт из `src/janus/fusion` в `src/janus/execution` (контракт `import-linter`).
+3. `fused_signal` **MUST** пройти Risk Gate. Ни один путь кода не ведёт из `src/augur/fusion` в `src/augur/execution` (контракт `import-linter`).
 4. `ttl_seconds` из fused_signal определяет `expires_at`; Risk Gate отклоняет просроченные (чек `signal_ttl`).
 5. Fusion не может повышать режим, менять лимиты или отключать чеки — его `risk_flags` могут только **ужесточать** решение (см. 7.2, чек `risk_flags`).
 
@@ -1167,7 +1167,7 @@ class ModeController:
 | Режим | Особенности исполнения |
 |---|---|
 | `PAPER` | Адаптер = `PaperBroker`; полный Risk Gate; ордера в `orders` с `mode='PAPER'` |
-| `MICRO_LIVE` | Реальный адаптер; `qty` принудительно = `max(min_qty, notional ≤ micro_live_max_notional)`; **первый ордер после входа в режим** ожидает ручного подтверждения (`janus orders approve <id>` или кнопка GUI, подтверждаемая кодом); остальные — автоматически |
+| `MICRO_LIVE` | Реальный адаптер; `qty` принудительно = `max(min_qty, notional ≤ micro_live_max_notional)`; **первый ордер после входа в режим** ожидает ручного подтверждения (`augur orders approve <id>` или кнопка GUI, подтверждаемая кодом); остальные — автоматически |
 | `FULL_AUTO` | Реальный адаптер; автоматическое исполнение в пределах `RiskLimits` |
 
 При старте процесса режим восстанавливается из `mode_state`, но **не выше** `settings.trading_mode`; если конфиг ниже сохранённого — понижение с записью в аудит.
@@ -1321,9 +1321,9 @@ class KillSwitch:
 
 Для триггера Fusion: детали того, *что* считается невалидным семантически, — `[→ FUSION SPEC]`; CircuitBreaker считает по `fused_signals.valid` и по событию `FusionInvalid`. `[ДОПУЩЕНИЕ]` Мягкая реакция до CB: после 3 invalid подряд Signal Engine сам переходит в ML-disabled на `fusion.cooldown_s` (300 с).
 
-Kill switch доступен: CLI `janus kill-switch --flatten`, GUI (кнопка + ввод кода), опционально Telegram-команда `/kill` с проверкой chat_id `[ДОПУЩЕНИЕ]`. Kill switch **не требует** кода подтверждения на включение (скорость важнее), только на сброс.
+Kill switch доступен: CLI `augur kill-switch --flatten`, GUI (кнопка + ввод кода), опционально Telegram-команда `/kill` с проверкой chat_id `[ДОПУЩЕНИЕ]`. Kill switch **не требует** кода подтверждения на включение (скорость важнее), только на сброс.
 
-После срабатывания: `janus cb reset --confirm` → режим `PAPER` → эскалация заново через `mode set`.
+После срабатывания: `augur cb reset --confirm` → режим `PAPER` → эскалация заново через `mode set`.
 
 ### 7.5. Аудит и воспроизводимость
 
@@ -1349,7 +1349,7 @@ class ReplayService:
         Возвращает расхождения. Ожидание: пустой diff при совпадающих code_version и config_hash."""
 ```
 
-CLI: `janus audit explain <signal_id>`, `janus audit replay <signal_id>`, `janus audit verify-chain` (проверка hash-chain `audit_log`).
+CLI: `augur audit explain <signal_id>`, `augur audit replay <signal_id>`, `augur audit verify-chain` (проверка hash-chain `audit_log`).
 
 ---
 
@@ -1475,30 +1475,30 @@ API по умолчанию слушает `127.0.0.1`. Доступ извне 
 
 ### 9.2. CLI (Typer)
 
-Имя команды — `janus`, точка входа — `janus.interfaces.cli.main:app` (`[project.scripts]` в `pyproject.toml`).
+Имя команды — `augur`, точка входа — `augur.interfaces.cli.main:app` (`[project.scripts]` в `pyproject.toml`).
 
 ```
-janus run [--mode-check]                         # запуск оркестратора
-janus backtest --strategy sma_cross --symbol BTC/USDT --tf 1h --from 2024-01-01 --to 2025-01-01 [--params params.json]
-janus signals list [--symbol] [--since]
-janus signals explain <signal_id>
-janus news fetch|list [--symbol]
-janus config validate                            # проверка .env/конфига для текущего режима
-janus mode show
-janus mode set <MODE> --confirm                  # запрос + ввод одноразового кода
-janus auto-trade enable                          # = mode set PAPER→... по шагам; алиас
-janus auto-trade disable                         # downgrade до SIGNAL_ONLY
-janus orders list|cancel <id>|approve <id>
-janus kill-switch [--flatten/--no-flatten]
-janus cb status|reset --confirm
-janus audit explain|replay <signal_id> | verify-chain
-janus db migrate|backup
-janus data backfill --symbol --tf --days
+augur run [--mode-check]                         # запуск оркестратора
+augur backtest --strategy sma_cross --symbol BTC/USDT --tf 1h --from 2024-01-01 --to 2025-01-01 [--params params.json]
+augur signals list [--symbol] [--since]
+augur signals explain <signal_id>
+augur news fetch|list [--symbol]
+augur config validate                            # проверка .env/конфига для текущего режима
+augur mode show
+augur mode set <MODE> --confirm                  # запрос + ввод одноразового кода
+augur auto-trade enable                          # = mode set PAPER→... по шагам; алиас
+augur auto-trade disable                         # downgrade до SIGNAL_ONLY
+augur orders list|cancel <id>|approve <id>
+augur kill-switch [--flatten/--no-flatten]
+augur cb status|reset --confirm
+augur audit explain|replay <signal_id> | verify-chain
+augur db migrate|backup
+augur data backfill --symbol --tf --days
 ```
 
 ### 9.3. Общие DTO
 
-Пакет `src/janus/interfaces/dto.py` — единственный источник моделей для GUI и CLI: `StatusDTO`, `SignalDTO`, `DecisionChainDTO`, `OrderDTO`, `PositionDTO`, `PortfolioSnapshotDTO`, `BacktestRequestDTO`, `BacktestResultDTO`, `NewsDTO`, `ModeChangeRequestDTO`, `KillSwitchRequestDTO`. CLI использует сервисный слой напрямую (in-process) либо HTTP-клиент к запущенному процессу (`--remote`) — с теми же DTO.
+Пакет `src/augur/interfaces/dto.py` — единственный источник моделей для GUI и CLI: `StatusDTO`, `SignalDTO`, `DecisionChainDTO`, `OrderDTO`, `PositionDTO`, `PortfolioSnapshotDTO`, `BacktestRequestDTO`, `BacktestResultDTO`, `NewsDTO`, `ModeChangeRequestDTO`, `KillSwitchRequestDTO`. CLI использует сервисный слой напрямую (in-process) либо HTTP-клиент к запущенному процессу (`--remote`) — с теми же DTO.
 
 ---
 
@@ -1507,7 +1507,7 @@ janus data backfill --symbol --tf --days
 | Область | Требование |
 |---|---|
 | Секреты | Только `.env`/переменные окружения/OS keyring; `.env` в `.gitignore`; `SecretStr`; pre-commit `gitleaks` |
-| Ключи биржи | Создаются с правами **trade-only, без вывода средств**, с IP-whitelist; доступны только `src/janus/execution` и `src/janus/adapters` (контракт `import-linter`: Settings с ключами передаётся адаптеру при сборке в composition root) |
+| Ключи биржи | Создаются с правами **trade-only, без вывода средств**, с IP-whitelist; доступны только `src/augur/execution` и `src/augur/adapters` (контракт `import-linter`: Settings с ключами передаётся адаптеру при сборке в composition root) |
 | LLM | В промпты/ответы не попадают ключи, `client_order_id`, балансы счёта сверх необходимого `[→ FUSION SPEC]` для деталей; Fusion-процесс не получает ключи бирж |
 | Валидация | Все входящие данные (адаптеры, новости, Fusion, API) — Pydantic с `extra="forbid"` там, где формат наш |
 | API | Bearer-токен, bind на localhost, rate limit, CORS выключен, подтверждение опасных действий кодом |
@@ -1523,7 +1523,7 @@ janus data backfill --symbol --tf --days
 ## 11. Структура проекта
 
 ```
-janus/
+augur/
 ├── pyproject.toml                 # uv/hatch, ruff, mypy --strict, pytest, import-linter
 ├── .env.example                   # все переменные БЕЗ значений
 ├── AGENTS.md                      # правила для Codex
@@ -1536,7 +1536,7 @@ janus/
 ├── docs/
 │   ├── ARCHITECTURE.md            # этот документ
 │   └── ML_LLM_FUSION_SPEC.md
-├── src/janus/
+├── src/augur/
 │   ├── config/        settings.py, hashing.py
 │   ├── db/            connection.py, writer.py, migrations/0001_core.sql, 0002_fusion_contract.sql, repositories/
 │   ├── data/          models.py, service.py, normalizer.py, validators.py
@@ -1564,7 +1564,7 @@ janus/
     └── e2e/           # сценарии: CB trip, kill switch, duplicate signal, reconnect
 ```
 
-> `src/janus/fusion/` — **тонкий интерфейсный модуль**: только контракт `FusedSignal`/`FusionRequest`, `FusionClient` Protocol, `HttpFusionClient` и `StubFusionClient`. Реализация — по `ML_LLM_FUSION_SPEC.md` (отдельный сервис/пакет).
+> `src/augur/fusion/` — **тонкий интерфейсный модуль**: только контракт `FusedSignal`/`FusionRequest`, `FusionClient` Protocol, `HttpFusionClient` и `StubFusionClient`. Реализация — по `ML_LLM_FUSION_SPEC.md` (отдельный сервис/пакет).
 
 Контракты `import-linter` (фрагмент):
 
@@ -1572,20 +1572,20 @@ janus/
 [[tool.importlinter.contracts]]
 name = "Signal Engine does not import ML/LLM"
 type = "forbidden"
-source_modules = ["janus.signals", "janus.risk", "janus.execution", "janus.strategies"]
+source_modules = ["augur.signals", "augur.risk", "augur.execution", "augur.strategies"]
 forbidden_modules = ["sklearn", "torch", "lightgbm", "xgboost", "anthropic", "openai", "transformers"]
 
 [[tool.importlinter.contracts]]
 name = "Fusion cannot reach execution"
 type = "forbidden"
-source_modules = ["janus.fusion"]
-forbidden_modules = ["janus.execution", "janus.adapters", "janus.risk"]
+source_modules = ["augur.fusion"]
+forbidden_modules = ["augur.execution", "augur.adapters", "augur.risk"]
 
 [[tool.importlinter.contracts]]
 name = "Only risk gate feeds execution"
 type = "forbidden"
-source_modules = ["janus.signals", "janus.news", "janus.strategies"]
-forbidden_modules = ["janus.execution"]
+source_modules = ["augur.signals", "augur.news", "augur.strategies"]
+forbidden_modules = ["augur.execution"]
 ```
 
 ---
@@ -1624,9 +1624,9 @@ pytest                      # тесты
 ruff check .                # линтер
 ruff format .               # форматирование
 mypy src                    # типы
-janus --version             # версия приложения
-janus backtest              # бэктест стратегии (заглушка до соответствующего этапа)
-janus kill-switch           # аварийная остановка торговли (заглушка до этапа Risk Gate)
+augur --version             # версия приложения
+augur backtest              # бэктест стратегии (заглушка до соответствующего этапа)
+augur kill-switch           # аварийная остановка торговли (заглушка до этапа Risk Gate)
 ```
 
 Перед коммитом: `ruff check .` и `pytest` должны проходить.
@@ -1651,10 +1651,10 @@ janus kill-switch           # аварийная остановка торгов
 |---|---|
 | `import-linter` в CI | импорт ML/LLM вне Fusion; Fusion → Execution; прямой вызов адаптера из сигналов |
 | semgrep-правило `no-direct-place-order` | `place_order(` вне `execution/` |
-| CODEOWNERS на `risk/`, `execution/`, `src/janus/db/migrations/`, `CLAUDE.md`, `AGENTS.md` | изменения требуют ревью человека |
+| CODEOWNERS на `risk/`, `execution/`, `src/augur/db/migrations/`, `CLAUDE.md`, `AGENTS.md` | изменения требуют ревью человека |
 | Golden-тесты Risk Gate | таблица (вход → вердикт); изменение вердиктов = падение тестов |
 | PR-шаблон с чекбоксом «skill auto-trade-risk-gate использован» + ссылка на чек-лист | процессный контроль |
-| Hook Claude Code `PreToolUse` на Edit/Write в `src/janus/{risk,execution}` | напоминание/блок, если skill не загружен `[ДОПУЩЕНИЕ: реализуется скриптом в .claude/settings.json]` |
+| Hook Claude Code `PreToolUse` на Edit/Write в `src/augur/{risk,execution}` | напоминание/блок, если skill не загружен `[ДОПУЩЕНИЕ: реализуется скриптом в .claude/settings.json]` |
 
 ---
 
@@ -1701,7 +1701,7 @@ Skills `hybrid-ml-llm-fusion` и `llm-output-validation` — в `ML_LLM_FUSION_S
 ```markdown
 ---
 name: auto-trade-risk-gate
-description: Use BEFORE creating or changing anything in src/janus/risk or src/janus/execution
+description: Use BEFORE creating or changing anything in src/augur/risk or src/augur/execution
   (pre-trade checks, position sizing, order state machine, idempotency, circuit breaker, kill switch,
   trading modes). Enforces the invariants of ARCHITECTURE.md sections 7.1–7.5.
 ---
@@ -1730,7 +1730,7 @@ description: Use BEFORE creating or changing anything in src/janus/risk or src/j
 5. In the PR description list which invariants were touched and why.
 
 ## Forbidden
-- Calling adapter.place_order/cancel_order outside src/janus/execution.
+- Calling adapter.place_order/cancel_order outside src/augur/execution.
 - Flags or config options that disable checks in MICRO_LIVE/FULL_AUTO.
 - try/except that swallows a failed check and approves.
 - Importing ML/LLM libraries.
@@ -1742,7 +1742,7 @@ description: Use BEFORE creating or changing anything in src/janus/risk or src/j
 |---|---|
 | Любые изменения в `risk/`, `execution/`, режимах, CB, kill switch | `auto-trade-risk-gate` |
 | Fusion-реализация (отдельный пакет) | `hybrid-ml-llm-fusion`, `llm-output-validation` `[→ FUSION SPEC]` |
-| Контракт `src/janus/fusion/contract.py` | `auto-trade-risk-gate` (раздел про ужесточение) + сверка с `ML_LLM_FUSION_SPEC.md` |
+| Контракт `src/augur/fusion/contract.py` | `auto-trade-risk-gate` (раздел про ужесточение) + сверка с `ML_LLM_FUSION_SPEC.md` |
 | Стратегии | `exit-strategies` |
 | Бэктест/издержки | `slippage-modeling`, `trade-journal` |
 | Чеки спреда/ликвидности | `market-microstructure` + `auto-trade-risk-gate` |

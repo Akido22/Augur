@@ -1,6 +1,6 @@
 ---
 name: hybrid-ml-llm-fusion
-description: Rules for fusing an ML forecast, validated LLM context and a technical signal into a Pydantic fused_signal in Janus - config-driven weights, veto rules (LLM risk_flag=high, low ML confidence), constraint-based verification, anti-sycophancy, TTL enforcement and ML-disabled fallback. Use when creating or modifying src/janus/fusion/*, the Signal Engine, fusion weights/thresholds, the FusedSignal model, or any code that combines ML and LLM signals. Do NOT use for parsing raw LLM output (use llm-output-validation) or for position sizing, order sending and trading modes (use auto-trade-risk-gate).
+description: Rules for fusing an ML forecast, validated LLM context and a technical signal into a Pydantic fused_signal in Augur - config-driven weights, veto rules (LLM risk_flag=high, low ML confidence), constraint-based verification, anti-sycophancy, TTL enforcement and ML-disabled fallback. Use when creating or modifying src/augur/fusion/*, the Signal Engine, fusion weights/thresholds, the FusedSignal model, or any code that combines ML and LLM signals. Do NOT use for parsing raw LLM output (use llm-output-validation) or for position sizing, order sending and trading modes (use auto-trade-risk-gate).
 ---
 
 # hybrid-ml-llm-fusion
@@ -8,7 +8,7 @@ description: Rules for fusing an ML forecast, validated LLM context and a techni
 Слияние ML-прогноза, LLM-контекста и технического сигнала в `fused_signal`. Fusion только предлагает сигнал. Решение об исполнении принимает `auto-trade-risk-gate`.
 
 ## When to use
-- Создаёшь или меняешь `src/janus/fusion/*`.
+- Создаёшь или меняешь `src/augur/fusion/*`.
 - Меняешь Signal Engine, веса слияния, пороги confidence или veto-правила.
 - Меняешь модель `FusedSignal` или её потребителей.
 
@@ -44,7 +44,7 @@ When NOT to use:
 
 ## Examples
 ```python
-# src/janus/fusion/models.py
+# src/augur/fusion/models.py
 from datetime import datetime
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
@@ -61,7 +61,7 @@ class FusedSignal(BaseModel):
 ```
 
 ```python
-# src/janus/fusion/engine.py
+# src/augur/fusion/engine.py
 def fuse(ml, llm, tech, cfg: FusionConfig, now: datetime) -> FusedSignal | None:
     if ml.confidence < cfg.ml_min_confidence:
         return None                                   # veto: weak ML

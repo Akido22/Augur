@@ -1,4 +1,4 @@
-# Проект: Janus — гибридная торговая система ML+LLM
+# Проект: Augur — гибридная торговая система ML+LLM
 
 Python 3.11+ · SQLite · MT5 (Форекс) · CCXT (крипто) · Alpaca (акции) · FastAPI + WebSocket · Typer.
 Текущая версия: см. `pyproject.toml` (единый источник истины, SemVer).
@@ -36,7 +36,7 @@ Data Layer → Signal Engine (Fusion) → Risk Gate → Execution → Interfaces
 - **Execution** — режимы `PAPER` / `MICRO_LIVE` / `FULL_AUTO`; каждое решение пишется в `decision_audit` с версиями.
 - **Interfaces** — FastAPI + WebSocket (GUI) и Typer (CLI); только читают состояние и отправляют команды.
 
-Код: `src/janus/`. Тесты: `tests/`. CLI: `janus.interfaces.cli.main:app`.
+Код: `src/augur/`. Тесты: `tests/`. CLI: `augur.interfaces.cli.main:app`.
 
 ## Команды
 
@@ -46,9 +46,9 @@ pytest                      # тесты
 ruff check .                # линтер
 ruff format .               # форматирование
 mypy src                    # типы
-janus --version             # версия приложения
-janus backtest              # бэктест стратегии (заглушка до соответствующего этапа)
-janus kill-switch           # аварийная остановка торговли (заглушка до этапа Risk Gate)
+augur --version             # версия приложения
+augur backtest              # бэктест стратегии (заглушка до соответствующего этапа)
+augur kill-switch           # аварийная остановка торговли (заглушка до этапа Risk Gate)
 ```
 
 Перед коммитом: `ruff check .` и `pytest` должны проходить.

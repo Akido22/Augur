@@ -1,6 +1,6 @@
 ---
 name: auto-trade-risk-gate
-description: Pre-trade checks, circuit breaker with position freeze, manual kill switch, PAPER / MICRO_LIVE / FULL_AUTO trading modes, order idempotency via client_order_id and versioned decision_audit for every order attempt in Janus. Use when creating or modifying src/janus/risk/*, src/janus/execution/*, exchange/broker adapters, or any code that sends, cancels or sizes orders or switches trading modes. Do NOT use for producing signals (use hybrid-ml-llm-fusion) or for validating LLM output (use llm-output-validation).
+description: Pre-trade checks, circuit breaker with position freeze, manual kill switch, PAPER / MICRO_LIVE / FULL_AUTO trading modes, order idempotency via client_order_id and versioned decision_audit for every order attempt in Augur. Use when creating or modifying src/augur/risk/*, src/augur/execution/*, exchange/broker adapters, or any code that sends, cancels or sizes orders or switches trading modes. Do NOT use for producing signals (use hybrid-ml-llm-fusion) or for validating LLM output (use llm-output-validation).
 ---
 
 # auto-trade-risk-gate
@@ -8,7 +8,7 @@ description: Pre-trade checks, circuit breaker with position freeze, manual kill
 Последний детерминированный барьер перед биржей. Каждый ордер проходит pre-trade checks и пишется в `decision_audit`. Защитные выходы (SL/TP) не блокируются никогда.
 
 ## When to use
-- Создаёшь или меняешь `src/janus/risk/*`, `src/janus/execution/*`, адаптеры бирж и брокеров.
+- Создаёшь или меняешь `src/augur/risk/*`, `src/augur/execution/*`, адаптеры бирж и брокеров.
 - Пишешь код, который отправляет, отменяет или модифицирует ордера или считает размер позиции.
 - Меняешь режимы PAPER / MICRO_LIVE / FULL_AUTO, circuit breaker, kill switch.
 
@@ -38,7 +38,7 @@ When NOT to use:
    - `scan_and_trade()` завершается раньше;
    - `_check_stop_loss_take_profit()` продолжает работать.
    Сброс флага — только на следующий торговый день по календарю инструмента, с записью в `audit_log`.
-5. Kill switch: `janus kill-switch` в CLI и кнопка в GUI. Состояние персистентно (SQLite) и переживает рестарт. Снятие требует явного подтверждения режима (`janus kill-switch --release --mode PAPER`). Автоматического снятия нет.
+5. Kill switch: `augur kill-switch` в CLI и кнопка в GUI. Состояние персистентно (SQLite) и переживает рестарт. Снятие требует явного подтверждения режима (`augur kill-switch --release --mode PAPER`). Автоматического снятия нет.
 6. Идемпотентность:
    - `client_order_id` генерируется детерминированно из `(signal_id, attempt_seq)`;
    - перед отправкой проверь `orders` на дубликат;
@@ -87,8 +87,8 @@ def execute_signal(self, sig) -> bool:
 ```
 
 ```bash
-janus kill-switch                       # стоп новых входов
-janus kill-switch --release --mode PAPER   # снятие с явным режимом
+augur kill-switch                       # стоп новых входов
+augur kill-switch --release --mode PAPER   # снятие с явным режимом
 ```
 
 ## Anti-patterns

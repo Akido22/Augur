@@ -214,12 +214,12 @@ class Bar(BaseModel, frozen=True):
     symbol: str            # каноническое имя: "BTC/USDT", "EURUSD", "AAPL"
     venue: str             # "ccxt:binance" | "mt5" | "alpaca"
     timeframe: str         # "1m","5m","15m","1h","4h","1d"
-    ts_open: datetime      # UTC, начало бара
+    ts_open: int           # Unix ms UTC, начало бара
     open: float; high: float; low: float; close: float; volume: float
     is_closed: bool = True
 
 class Tick(BaseModel, frozen=True):
-    symbol: str; venue: str; ts: datetime
+    symbol: str; venue: str; ts: int   # Unix ms UTC
     bid: Decimal; ask: Decimal; last: Decimal | None = None; volume: float | None = None
 
 # src/augur/data/service.py
@@ -463,7 +463,8 @@ class Orchestrator:
 ### 3.2. DDL основных таблиц
 
 ```sql
--- 0001_core.sql
+-- 0001_core.sql — signals, orders, audit_log, mode_state, cb_state; ohlcv — 0002_ohlcv.sql;
+-- news, fills, positions, portfolio_snapshots — миграциями своих этапов
 CREATE TABLE ohlcv (
     venue       TEXT    NOT NULL,
     symbol      TEXT    NOT NULL,
@@ -777,7 +778,7 @@ class OrderAck(BaseModel, frozen=True):
     raw: dict = {}              # сырой ответ (без секретов) для аудита
 
 class AccountState(BaseModel, frozen=True):
-    equity: Decimal; cash: Decimal; margin_used: Decimal; currency: str; ts: datetime
+    equity: Decimal; cash: Decimal; margin_used: Decimal; currency: str; ts: int  # Unix ms UTC
 
 class InstrumentSpec(BaseModel, frozen=True):
     symbol: str; qty_step: Decimal; min_qty: Decimal; min_notional: Decimal
@@ -789,7 +790,7 @@ class MarketAdapter(Protocol):
     async def connect(self) -> None: ...
     async def close(self) -> None: ...
     async def get_historical(self, symbol: str, timeframe: str,
-                             start: datetime, end: datetime) -> list[Bar]: ...
+                             start: int, end: int) -> list[Bar]: ...  # Unix ms UTC, start <= ts_open < end
     async def get_latest(self, symbol: str) -> Tick: ...
     async def place_order(self, req: OrderRequest) -> OrderAck: ...
     async def cancel_order(self, client_order_id: str, symbol: str) -> OrderAck: ...

@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     mt5_login: int | None = None
     mt5_password: SecretStr | None = None
     mt5_server: str | None = None
+    mt5_server_utc_offset: int = (
+        0  # часы: время сервера брокера − UTC (ARCH §4.3, задаётся вручную)
+    )
     alpaca_api_key: SecretStr | None = None
     alpaca_api_secret: SecretStr | None = None
     alpaca_paper: bool = True

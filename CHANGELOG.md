@@ -7,6 +7,30 @@
 
 ## [Unreleased]
 
+### Добавлено
+
+- Протокол `MarketAdapter` (async) и DTO `OrderRequest`, `OrderAck`, `AccountState`, `InstrumentSpec`,
+  `VenuePosition`, `OrderState`, `MarketStatus` по ARCHITECTURE.md §4.1; иерархия ошибок
+  `AdapterError` → `RetryableError` / `RejectedError` / `FatalAdapterError`.
+- DTO рыночных данных `Bar`, `Tick` (время — int ms UTC) и проверки целостности бара.
+- Политика вызовов `CallPolicy` + `call_with_retry`: таймаут, экспоненциальная пауза с jitter,
+  повтор только сетевых ошибок/таймаутов (ARCHITECTURE.md §4.2).
+- `PaperAdapter`: детерминированные синтетические котировки без сети, мгновенное исполнение
+  по текущей цене, идемпотентность по `client_order_id`.
+- Адаптеры только для чтения: `CcxtAdapter` (крипто), `AlpacaAdapter` (акции), `Mt5Adapter` (Форекс);
+  ордера через них — `NotImplementedError` до 0.7.0. SDK — опциональные extras `[ccxt]`, `[alpaca]`,
+  `[mt5]`, импортируются лениво.
+- Миграция `0002_ohlcv` (compat: expand, db_schema_version 2): таблица `ohlcv` (STRICT, PK по
+  venue/symbol/timeframe/ts_open).
+- `OhlcvLoader`: загрузка истории через адаптер с идемпотентным UPSERT; незакрытые бары не сохраняются,
+  некорректные отбрасываются с записью `DATA_ANOMALY` в `audit_log` (hash-chain).
+- Настройка `mt5_server_utc_offset` (часы) для перевода времени сервера MT5 в UTC.
+
+### Изменено
+
+- ARCHITECTURE.md §2.3, §4.1: время в `Bar`, `Tick`, `AccountState` и диапазон `get_historical` — int ms UTC.
+- VERSIONING.md §4: хранилище 0.2.0 — таблица `ohlcv` вместо `instruments`/`candles`.
+
 ## [0.1.0] - 2026-11-21
 
 **Компоненты:** db_schema_version 1 · api_version — · артефакты —

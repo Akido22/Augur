@@ -35,6 +35,10 @@ ml = [
     "pandas",
     "numpy",
 ]
+# SDK площадок (0.2.0): импортируются лениво при connect(); тесты работают без них.
+ccxt = ["ccxt>=4"]
+alpaca = ["alpaca-py>=0.30"]
+mt5 = ["MetaTrader5>=5.0.45; sys_platform == 'win32'"]  # только Windows + запущенный терминал
 
 [project.scripts]
 augur = "augur.interfaces.cli.main:app"

@@ -1,0 +1,1 @@
+"""CLI `augur` на Typer."""

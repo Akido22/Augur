@@ -638,24 +638,30 @@ CREATE TABLE cb_state (
 Только то, что нужно Signal Engine / Risk / Execution для аудита. Таблицы `ml_models`, `ml_predictions`, `llm_calls` — `[→ FUSION SPEC]`, здесь **не создаются**.
 
 ```sql
--- 0002_fusion_contract.sql
+-- 0001_core.sql (фрагмент)
+-- Контракт fused_signal — ML_LLM_FUSION_SPEC.md §4.6 + api_version; action хранится после
+-- документированного маппинга Fusion → SignalAction (enter_long→BUY, enter_short→SELL,
+-- exit→CLOSE, reduce→REDUCE, hold→HOLD, no_signal→NO_SIGNAL).
 CREATE TABLE fused_signals (
     id                    TEXT    PRIMARY KEY,   -- ULID, выдаётся Signal Engine при приёме
-    signal_id             TEXT    NOT NULL,      -- итоговый signals.id (kind='final')
-    fusion_request_id     TEXT    NOT NULL,      -- id запроса к Fusion (для связи с FUSION SPEC таблицами)
+    signal_id             TEXT    NOT NULL UNIQUE, -- UUID, выданный Fusion
+    idempotency_key       TEXT    NOT NULL UNIQUE, -- защита от дублей ордеров
+    api_version           TEXT    NOT NULL,      -- версия контракта, "1.0"; другая MAJOR → отклоняется
+    asset                 TEXT    NOT NULL,
+    timestamp             INTEGER NOT NULL,      -- close_time бара, Unix ms UTC
+    expires_at            INTEGER NOT NULL,      -- Unix ms UTC
     action                TEXT    NOT NULL CHECK (action IN ('BUY','SELL','CLOSE','REDUCE','HOLD','NO_SIGNAL')),
     strength              REAL    NOT NULL CHECK (strength BETWEEN 0 AND 1),
-    source_breakdown_json TEXT    NOT NULL,      -- {"classic":0.6,"ml":0.3,"llm":0.1}
-    risk_flags_json       TEXT    NOT NULL DEFAULT '[]',
+    reason                TEXT    NOT NULL,
     explanation_ref       TEXT,
-    ttl_seconds           INTEGER NOT NULL CHECK (ttl_seconds BETWEEN 1 AND 86400),
-    contract_version      TEXT    NOT NULL,      -- "fused_signal/1.0"
+    risk_flags_json       TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(risk_flags_json)),
+    source_breakdown_json TEXT    NOT NULL CHECK (json_valid(source_breakdown_json)),  -- {ml, tech, llm, rules_fired}
+    fusion_config_version TEXT    NOT NULL,      -- версия конфига весов/порогов, "fusion-2026.11.1"
     valid                 INTEGER NOT NULL CHECK (valid IN (0,1)),
     validation_errors_json TEXT   NOT NULL DEFAULT '[]',
-    created_at            INTEGER NOT NULL
+    created_at            INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))  -- Unix ms UTC
 ) STRICT;
-CREATE UNIQUE INDEX ux_fused_request ON fused_signals(fusion_request_id);
-CREATE INDEX ix_fused_signal ON fused_signals(signal_id);
+CREATE INDEX ix_fused_asset_ts ON fused_signals(asset, timestamp);
 CREATE INDEX ix_fused_created ON fused_signals(created_at);
 
 -- Схема decision_audit — VERSIONING.md §6.1 (единственный источник истины)
@@ -715,7 +721,7 @@ BEGIN SELECT RAISE(ABORT, 'decision_audit row is immutable'); END;
 |---|---|
 | Бары за диапазон | PK `ohlcv(venue,symbol,timeframe,ts_open)` |
 | Активные ордера для реконсиляции | частичный `ix_orders_state` |
-| Цепочка решения по сигналу | `ix_fused_signal`, `ix_audit_ref` |
+| Цепочка решения по сигналу | PK `fused_signals(id)`, UNIQUE `fused_signals(signal_id)`, `ix_audit_ref` |
 | Последние N fused_signal (для streak) | `ix_fused_created` |
 | Дневной PnL | PK `portfolio_snapshots(mode, ts)` |
 | Новости за окно | `ix_news_published` |

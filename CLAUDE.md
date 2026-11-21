@@ -26,9 +26,9 @@ Python 3.11+ · SQLite · MT5 (Форекс) · CCXT (крипто) · Alpaca (�
 
 ## Архитектура (кратко)
 
-​```
+```
 Data Layer → Signal Engine (Fusion) → Risk Gate → Execution → Interfaces
-​```
+```
 
 - **Data Layer** — котировки и история через адаптеры MT5 / CCXT / Alpaca, хранение в SQLite.
 - **Signal Engine (Fusion)** — объединяет ML-предсказание и LLM-оценку в `fused_signal`; единственное место ML/LLM-логики.
@@ -40,7 +40,7 @@ Data Layer → Signal Engine (Fusion) → Risk Gate → Execution → Interfaces
 
 ## Команды
 
-​```bash
+```bash
 pip install -e ".[dev]"     # установка для разработки
 pytest                      # тесты
 ruff check .                # линтер
@@ -49,7 +49,7 @@ mypy src                    # типы
 janus --version             # версия приложения
 janus backtest              # бэктест стратегии (заглушка до соответствующего этапа)
 janus kill-switch           # аварийная остановка торговли (заглушка до этапа Risk Gate)
-​```
+```
 
 Перед коммитом: `ruff check .` и `pytest` должны проходить.
 

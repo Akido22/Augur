@@ -90,7 +90,7 @@ CREATE TABLE schema_migrations (
     compat       TEXT    NOT NULL CHECK (compat IN ('expand', 'contract')),
     app_version  TEXT    NOT NULL,                  -- версия Augur, применившая миграцию
     applied_at   INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))  -- Unix ms UTC
-);
+) STRICT;
 ```
 
 ### 2.3 Уровень артефактов
@@ -118,7 +118,7 @@ CREATE TABLE artifacts (
     metadata    TEXT NOT NULL,                     -- JSON: features, train_range, llm_model, temperature…
     created_at  INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),  -- Unix ms UTC
     PRIMARY KEY (kind, version)
-);
+) STRICT;
 ```
 
 ### 2.4 Сводная таблица

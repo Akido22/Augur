@@ -9,7 +9,7 @@ description = "Augur — гибридная торговая система ML+L
 readme = "README.md"
 requires-python = ">=3.11"
 license = "LicenseRef-Proprietary"
-authors = [{ name = "Augur Team" }]
+authors = [{ name = "Artem" }]
 dependencies = [
     "pydantic>=2",
     "pydantic-settings>=2",

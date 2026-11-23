@@ -48,6 +48,10 @@ line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
 
+[tool.ruff.format]
+# Примеры кода в спецификациях и skills — документация, а не исходники проекта.
+exclude = ["*.md"]
+
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S"]
 ignore = []

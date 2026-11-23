@@ -25,6 +25,12 @@
 - `OhlcvLoader`: загрузка истории через адаптер с идемпотентным UPSERT; незакрытые бары не сохраняются,
   некорректные отбрасываются с записью `DATA_ANOMALY` в `audit_log` (hash-chain).
 - Настройка `mt5_server_utc_offset` (часы) для перевода времени сервера MT5 в UTC.
+- Мигратор `augur.db.migrator.Migrator` (VERSIONING.md §2.2, §8): forward-only, каждая миграция и её
+  запись в `schema_migrations` — одна транзакция; при ошибке откатывается только упавшая миграция.
+  checksum — sha256 с нормализацией CRLF→LF; изменённая применённая миграция → `ChecksumMismatchError`.
+  Бэкап `VACUUM INTO backups/augur_pre_v<app>_schema<N>_<ts>.db` перед применением.
+  БД новее кода допускается, только если лишние миграции `expand`.
+- CLI: `augur db migrate`, `augur db status`, `augur db backup` (`--db`, по умолчанию `data/augur.db`).
 
 ### Изменено
 

@@ -1,8 +1,9 @@
 """Базовый класс стратегии и сигнал (ARCHITECTURE.md §2.5, §6.1).
 
-Этап 0.3.0 — упрощённый интерфейс: `on_bar(bar, history) -> Signal | None`.
-`StrategySignal` из §2.5 (signal_id, params_hash, data_hash) и `StrategyContext`
-появятся вместе с Signal Engine (0.4.0).
+Контракт 0.4.0 реализован: стратегия реализует `on_bar(bar, history) -> Signal | None`,
+а `generate_signals(ctx: StrategyContext) -> list[StrategySignal]` — обёртка над ним
+(ARCHITECTURE.md §2.5/§6.1). `StrategyContext` и `StrategySignal` (signal_id ULID,
+params_hash, data_hash) определены в Signal Engine (`augur.signals.engine`).
 
 Стратегия — чистая функция от входа: никакой сети, системного времени и `random`
 без seed. Она видит только закрытый текущий бар и бары до него.
@@ -11,11 +12,14 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from augur.data.models import Bar
+
+if TYPE_CHECKING:
+    from augur.signals.engine import StrategyContext, StrategySignal
 
 
 class SignalAction(StrEnum):
@@ -95,3 +99,18 @@ class Strategy(ABC):
         Returns:
             Сигнал или None, если действия нет.
         """
+
+    def generate_signals(self, ctx: "StrategyContext") -> list["StrategySignal"]:
+        """Обёртка над `on_bar` для Signal Engine (ARCHITECTURE.md §2.5).
+
+        Returns:
+            `[]`, если стратегия не дала сигнала, иначе один `StrategySignal`
+            с ULID, `params_hash` и `data_hash`.
+        """
+        # Локальный импорт: signals.engine импортирует этот модуль.
+        from augur.signals.engine import StrategySignal
+
+        signal = self.on_bar(ctx.bar, ctx.history)
+        if signal is None:
+            return []
+        return [StrategySignal.from_signal(signal, strategy=self, ctx=ctx)]

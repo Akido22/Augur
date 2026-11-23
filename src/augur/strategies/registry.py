@@ -1,10 +1,12 @@
 """Реестр стратегий: имя → класс (ARCHITECTURE.md §2.5)."""
 
+import re
 from typing import Any, TypeVar
 
 from augur.strategies.base import Strategy
 
 _REGISTRY: dict[str, type[Strategy]] = {}
+_SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 
 S = TypeVar("S", bound=type[Strategy])
 
@@ -14,7 +16,13 @@ class UnknownStrategyError(KeyError):
 
 
 def register_strategy(cls: S) -> S:
-    """Декоратор регистрации. Повторное имя — ошибка (две реализации под одним именем)."""
+    """Декоратор регистрации. Повторное имя — ошибка (две реализации под одним именем).
+
+    Raises:
+        ValueError: имя уже занято другим классом или `version` — не SemVer `X.Y.Z`.
+    """
+    if not _SEMVER.fullmatch(cls.version):
+        raise ValueError(f"strategy {cls.name!r}: version {cls.version!r} is not SemVer X.Y.Z")
     existing = _REGISTRY.get(cls.name)
     if existing is not None and existing is not cls:
         raise ValueError(f"strategy {cls.name!r} already registered by {existing.__qualname__}")
@@ -46,6 +54,7 @@ def list_strategies() -> list[dict[str, Any]]:
             {
                 "name": name,
                 "version": strategy.version,
+                "strategy_version": strategy.strategy_version,
                 "params": strategy.params,
                 "warmup_bars": strategy.warmup_bars,
             }

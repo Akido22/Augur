@@ -151,7 +151,7 @@ class Backtester:
         )
         return BacktestResult(
             strategy=strategy.name,
-            strategy_version=strategy.version,
+            strategy_version=strategy.strategy_version,
             params=strategy.params,
             equity_curve=equity_curve,
             trades=self._trades,

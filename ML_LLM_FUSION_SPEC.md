@@ -16,7 +16,7 @@ Nov 20, 2026 · @Artem
 - **\[Д4\]** Data Layer отдаёт новости нормализованными: `news_id`, `published_at` (UTC), `source`, `tickers[]`, `title`, `body` (обрезанный).
 - **\[Д5\]** Все временные метки — UTC, миллисекунды Unix epoch; в SQLite хранятся как INTEGER.
 - **\[Д6\]** Цены токенов LLM-провайдеров задаются в конфиге, а не в коде, и периодически сверяются вручную.
-- **\[Д7\]** По умолчанию автоторговля выключена: режимы `paper` → `manual_confirm` → `auto` переключаются явно, с записью в аудит.
+- **\[Д7\]** По умолчанию автоторговля выключена: режимы `PAPER` → `MICRO_LIVE` → `FULL_AUTO` переключаются явно, с записью в аудит (ARCHITECTURE.md §1.4).
 - **\[Д8\]** Числовые пороги в этом документе (веса, confidence, бюджеты) — стартовые значения для конфига. Их нужно подобрать на walk-forward-бэктесте, а не принимать как данность.
 
 ## 1. Роли слоёв
@@ -517,25 +517,43 @@ def fuse(ml: MLPrediction | None, llm: LLMContextResult | None,
 
 ### 4.6 Выход: `fused_signal`
 
+> **Источник истины.** Этот раздел — каноническое определение схемы `fused_signal`.
+> `ARCHITECTURE.md` §5 ссылается на него и описывает только поведение потребителя.
+> При расхождении схемы — приоритет у этого раздела.
+
+Схема описывает `fused_signal` на границе `FusionClient` → Signal Engine, то есть **после** документированного маппинга внутреннего `Action` из §4.5 в `SignalAction` (`enter_long→BUY`, `enter_short→SELL`, `exit→CLOSE`, `reduce→REDUCE`, `hold→HOLD`, `no_signal→NO_SIGNAL`; ARCHITECTURE.md §2.7). Python-модель — `augur.fusion.contract.FusedSignal` (Pydantic v2, `extra="forbid"`); DDL — §7 и миграции `0001_core` + `0003_fusion_contract`.
+
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "FusedSignal",
   "type": "object",
   "additionalProperties": false,
-  "required": ["signal_id", "idempotency_key", "asset", "timestamp", "expires_at",
-               "action", "strength", "explanation_ref", "risk_flags", "source_breakdown",
+  "required": ["api_version", "signal_id", "idempotency_key", "asset", "timestamp", "expires_at",
+               "action", "strength", "reason", "explanation_ref", "risk_flags", "source_breakdown",
                "fusion_config_version"],
   "properties": {
+    "api_version": {"type": "string", "pattern": "^\\d+\\.\\d+$", "description": "версия контракта, = augur.versions.API_VERSION (\"1.0\"); другая версия → отклоняется"},
     "signal_id": {"type": "string", "format": "uuid"},
     "idempotency_key": {"type": "string"},
     "asset": {"type": "string"},
     "timestamp": {"type": "integer"},
     "expires_at": {"type": "integer"},
-    "action": {"enum": ["enter_long", "enter_short", "exit", "reduce", "hold", "no_signal"]},
+    "action": {"enum": ["BUY", "SELL", "CLOSE", "REDUCE", "HOLD", "NO_SIGNAL"]},
     "strength": {"type": "number", "minimum": 0, "maximum": 1},
-    "explanation_ref": {"type": "string", "description": "decision_audit.id или URI объяснения"},
-    "risk_flags": {"type": "array", "items": {"type": "string"}},
+    "explanation_ref": {"type": "string", "minLength": 1, "description": "строка-ссылка: \"decision_audit:<ulid>\" (0.5.0+) или \"fusion_stub\" (0.4.0); не FK"},
+    "risk_flags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity"],
+        "properties": {
+          "code": {"type": "string"},
+          "severity": {"enum": ["low", "medium", "high"]}
+        }
+      }
+    },
     "reason": {"type": "string"},
     "source_breakdown": {
       "type": "object",
@@ -546,24 +564,29 @@ def fuse(ml: MLPrediction | None, llm: LLMContextResult | None,
         "rules_fired": {"type": "array", "items": {"type": "string"}}
       }
     },
-    "fusion_config_version": {"type": "string"}
+      "fusion_config_version": {"type": "string"}
   }
 }
 ```
+
+Дополнительно к схеме: `expires_at > timestamp` (иначе сигнал невалиден); `timestamp` и `expires_at` — Unix ms UTC.
+
+**explanation_ref** — обязательное поле (NOT NULL в БД). Это НЕ внешний ключ на decision_audit, а строка-ссылка. Формат: "decision_audit:<ulid>" (0.5.0+, <ulid> заранее генерируется Signal Engine и передаётся Decision Audit Writer) или "fusion_stub" (0.4.0). Порядок записи: fused_signals → decision_audit, поэтому FK невозможен; висячая ссылка при сбое аудита — не нарушение БД.
 
 Пример: ML за лонг, tech подтверждает, LLM слегка негативен с medium-флагом — сигнал ослаблен и упал ниже порога.
 
 ```json
 {
+  "api_version": "1.0",
   "signal_id": "0b7f6d0e-2c41-4e7a-8f7e-91d3c6a2b001",
   "idempotency_key": "sha256:4f1c…",
   "asset": "BTCUSDT@binance",
   "timestamp": 1795161600000,
   "expires_at": 1795162050000,
-  "action": "hold",
+  "action": "HOLD",
   "strength": 0.0929,
-  "explanation_ref": "decision_audit:18342",
-  "risk_flags": ["exchange_incident:medium"],
+  "explanation_ref": "decision_audit:01JD3XB4K7M2N8P9Q0R1S2T3V4",
+  "risk_flags": [{"code": "exchange_incident", "severity": "medium"}],
   "reason": "below_entry_threshold",
   "source_breakdown": {
     "ml":   {"direction": "long", "confidence": 0.62, "score": 0.1556, "weight": 0.5,
@@ -654,7 +677,7 @@ def aggregate_samples(samples: list[LLMContext], cfg: VarianceCfg) -> LLMContext
 2. Параллельно: ML-инференс (цель p95 < 200 мс), расчёт tech-сигнала и чтение последнего валидного `LLMContext` из кэша. LLM не вызывается синхронно на критическом пути: контекст обновляется асинхронно по событиям и расписанию.
 3. `fuse()` → `FusedSignal`, запись в `fused_signals`.
 4. Risk Gate: проверка TTL (`now < expires_at`, иначе reject `expired`), дедупликация по `idempotency_key`, pre-trade checks, расчёт размера → `risk_verdict` (`APPROVED` / `REDUCED` / `REJECTED`) → запись в `decision_audit` (INSERT + COMMIT до отправки ордера, `VERSIONING.md` §6.2).
-5. Режим `paper` / `manual_confirm` / `auto` \[Д7\]: в `manual_confirm` сигнал ждёт подтверждения, но не дольше TTL.
+5. Режим `PAPER` / `MICRO_LIVE` / `FULL_AUTO` \[Д7\]: в `MICRO_LIVE` первый ордер после входа в режим ждёт ручного подтверждения, но не дольше TTL.
 6. Execution отправляет ордер с `client_order_id = idempotency_key[:32]`. Повторная отправка с тем же id биржа отклонит или вернёт существующий ордер.
 7. `ExecutionReport` → `decision_audit.execution_result`, `orders`, `positions`.
 8. Асинхронно — LLM `explain` для аудита (только для ENTER/EXIT/REDUCE, чтобы экономить бюджет).
@@ -747,22 +770,29 @@ CREATE INDEX IF NOT EXISTS ix_llm_calls_group   ON llm_calls(request_group);
 CREATE INDEX IF NOT EXISTS ix_llm_calls_hash    ON llm_calls(prompt_hash);
 
 -- Сигналы Fusion [Д9] -------------------------------------------------------
-CREATE TABLE IF NOT EXISTS fused_signals (
-    id                    TEXT    PRIMARY KEY,             -- ULID
-    signal_uuid           TEXT    NOT NULL UNIQUE,
-    idempotency_key       TEXT    NOT NULL UNIQUE,
+-- Схема — §4.6 (источник истины); фактический DDL — миграции 0001_core + 0003_fusion_contract.
+-- action хранится после маппинга Fusion → SignalAction (ARCHITECTURE.md §2.7).
+CREATE TABLE fused_signals (
+    id                    TEXT    PRIMARY KEY,             -- ULID, выдаётся Signal Engine при приёме
+    signal_id             TEXT    NOT NULL UNIQUE,         -- UUID, выданный Fusion
+    idempotency_key       TEXT    NOT NULL UNIQUE,         -- защита от дублей ордеров
+    api_version           TEXT    NOT NULL,                -- версия контракта, "1.0"
     asset                 TEXT    NOT NULL,
-    timestamp             INTEGER NOT NULL,
-    expires_at            INTEGER NOT NULL,
-    action                TEXT    NOT NULL CHECK (action IN
-                          ('enter_long','enter_short','exit','reduce','hold','no_signal')),
+    timestamp             INTEGER NOT NULL,                -- close_time бара, Unix ms UTC
+    expires_at            INTEGER NOT NULL,                -- Unix ms UTC
+    action                TEXT    NOT NULL CHECK (action IN ('BUY','SELL','CLOSE','REDUCE','HOLD','NO_SIGNAL')),
     strength              REAL    NOT NULL CHECK (strength BETWEEN 0 AND 1),
     reason                TEXT    NOT NULL,
-    risk_flags_json       TEXT    NOT NULL CHECK (json_valid(risk_flags_json)),
-    source_breakdown_json TEXT    NOT NULL CHECK (json_valid(source_breakdown_json)),
-    fusion_config_version TEXT    NOT NULL
+    explanation_ref       TEXT    NOT NULL,                -- строка-ссылка, НЕ FK (§4.6)
+    risk_flags_json       TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(risk_flags_json)),
+    source_breakdown_json TEXT    NOT NULL CHECK (json_valid(source_breakdown_json)),  -- {ml, tech, llm, rules_fired}
+    fusion_config_version TEXT    NOT NULL,                -- версия конфига весов/порогов
+    valid                 INTEGER NOT NULL CHECK (valid IN (0,1)),
+    validation_errors_json TEXT   NOT NULL DEFAULT '[]',
+    created_at            INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))  -- Unix ms UTC
 ) STRICT;
-CREATE INDEX IF NOT EXISTS ix_fused_asset_ts ON fused_signals(asset, timestamp);
+CREATE INDEX ix_fused_asset_ts ON fused_signals(asset, timestamp);
+CREATE INDEX ix_fused_created ON fused_signals(created_at);
 
 -- Аудит решений: схема — VERSIONING.md §6.1 (единственный источник истины) ---
 CREATE TABLE decision_audit (
@@ -993,12 +1023,12 @@ description: Use before writing or changing Risk Gate, pre-trade checks, circuit
 ## Инварианты
 1. Единственный путь к бирже: FusedSignal → RiskGate.evaluate() → ApprovedOrder → Executor.
    Executor принимает ТОЛЬКО ApprovedOrder (тип, не dict).
-2. Проверки в порядке: kill switch → режим (paper/manual_confirm/auto) → TTL (now < expires_at)
+2. Проверки в порядке: kill switch → режим (PAPER/MICRO_LIVE/FULL_AUTO) → TTL (now < expires_at)
    → дедупликация idempotency_key → торговая сессия/инструмент активен → лимиты позиции,
    плеча, экспозиции на класс активов, дневного убытка → корреляция с открытыми → ценовой дрейф.
 3. Размер = min(лимиты) × strength. strength никогда не расширяет лимит.
 4. EXIT/REDUCE проходят даже при открытом брейкере (но не при kill switch, если он в режиме freeze).
-5. Лимиты читаются из read-only конфига; код не может их писать. Переключение в auto —
+5. Лимиты читаются из read-only конфига; код не может их писать. Переключение в FULL_AUTO —
    только CLI-команда человека с записью в audit_log.
 6. client_order_id = idempotency_key[:32]; повтор после таймаута — сначала запрос статуса ордера.
 7. Каждое решение → decision_audit.risk_verdict (APPROVED / REDUCED / REJECTED) + risk_reason, INSERT + COMMIT
@@ -1009,7 +1039,7 @@ description: Use before writing or changing Risk Gate, pre-trade checks, circuit
 - Просроченный сигнал → REJECTED (причина "expired").
 - Дубль idempotency_key → второй ордер не отправлен.
 - strength = 1.0 при исчерпанном лимите → REJECTED.
-- Режим paper → нет сетевых вызовов к бирже (проверяется моком).
+- Режим PAPER → нет сетевых вызовов к бирже (проверяется моком).
 - Брейкер OPEN + EXIT → APPROVED; брейкер OPEN + ENTER → REJECTED.
 
 ## Пример
@@ -1033,12 +1063,12 @@ if verdict.status in ("APPROVED", "REDUCED"):
 | # | Риск / вопрос | Что уже сделано в спецификации | Что остаётся открытым |
 | --- | --- | --- | --- |
 | 1 | **Галлюцинации LLM** — выдуманные события, неверная трактовка новости | Grounding по `evidence_ids`, variance filter, LLM только ослабляет | Неверная *интерпретация* реальной новости grounding не ловит. Нужен размеченный eval-набор (200–500 новостей с эталонными флагами). Кто его размечает? |
-| 2 | **Стоимость inference** — 3 сэмпла × активы × частота | Дневной бюджет, кэш по `prompt_hash`, 3 сэмпла только при событиях, дешёвый/локальный провайдер в цепочке | Реальные цены и объём токенов неизвестны \[Д6\]. Нужен замер за 2 недели на paper и сравнение с пользой из отчёта 6.4 |
+| 2 | **Стоимость inference** — 3 сэмпла × активы × частота | Дневной бюджет, кэш по `prompt_hash`, 3 сэмпла только при событиях, дешёвый/локальный провайдер в цепочке | Реальные цены и объём токенов неизвестны \[Д6\]. Нужен замер за 2 недели в режиме PAPER и сравнение с пользой из отчёта 6.4 |
 | 3 | **Переобучение ML** — подгонка под историю, деградация при смене режима | Purged walk-forward, embargo, калибровка, shadow 14 дней, PSI-мониторинг | Нужен учёт числа испытаний (deflated Sharpe) и правило, сколько итераций подбора допустимо на одном датасете |
 | 4 | **Задержки** — LLM 2–8 с, новость уже в цене | LLM вне критического пути, кэш контекста, TTL сигнала, проверка ценового дрейфа | На 15m и выше это приемлемо. Для таймфреймов < 5m LLM, вероятно, бесполезен — фиксируем ли нижнюю границу? |
 | 5 | **Anti-sycophancy и momentum-echo** — LLM повторяет недавнее движение цены вместо анализа новостей | Нет ML/позиции в промпте, контрфактические тесты, мониторинг корреляции | `price_summary` нужен для детекции расхождений, но сам провоцирует эхо. Альтернатива — разнести sentiment и divergence по двум разным вызовам (цена — только во втором). Решить по результатам тестов |
-| 6 | **Look-ahead в данных новостей и в самой LLM** — при бэктесте модель «знает» исход событий из обучающих данных | `available_at` для новостей; replay по сохранённому `response_json` | Исторический бэктест LLM-слоя до knowledge cutoff модели недостоверен. Оценка пользы LLM — только forward (paper/shadow). Сколько месяцев forward-данных достаточно? |
-| 7 | **Регуляторика** — алгоритмическая торговля, использование AI в решениях, хранение записей | Полный audit trail, воспроизводимость решений, kill switch, ручное включение auto | Требования зависят от юрисдикции и статуса (частный трейдер или управление чужими средствами). Нужна юридическая проверка до включения `auto` — этот документ не является юридической консультацией. Также проверить условия использования новостных фидов и LLM-API для торговых целей |
+| 6 | **Look-ahead в данных новостей и в самой LLM** — при бэктесте модель «знает» исход событий из обучающих данных | `available_at` для новостей; replay по сохранённому `response_json` | Исторический бэктест LLM-слоя до knowledge cutoff модели недостоверен. Оценка пользы LLM — только forward (PAPER/shadow). Сколько месяцев forward-данных достаточно? |
+| 7 | **Регуляторика** — алгоритмическая торговля, использование AI в решениях, хранение записей | Полный audit trail, воспроизводимость решений, kill switch, ручное включение FULL_AUTO | Требования зависят от юрисдикции и статуса (частный трейдер или управление чужими средствами). Нужна юридическая проверка до включения `FULL_AUTO` — этот документ не является юридической консультацией. Также проверить условия использования новостных фидов и LLM-API для торговых целей |
 | 8 | **Рассинхрон провайдеров** — разные LLM дают разные распределения `context_score`; провайдер может тихо обновить модель | Лог `provider`/`model` на каждый вызов, z-score мониторинг | Нужна ли попровайдерная калибровка шкалы или разные пороги при fallback? Закреплять снапшоты версий моделей везде, где провайдер их даёт |
 | 9 | **Калибровка весов Fusion** — стартовые 0,5 / 0,3 / 0,2 взяты априорно | Конфиг с версией, replay на истории | Подбор весов — ещё один источник переобучения. Оставить фиксированными и менять только пороги — или подбирать в nested walk-forward? |
 | 10 | **Разница рынков** — Форекс (сессии, свопы, нет объёма), акции (гэпы, отчётность, корпоративные действия), крипто (24/7, funding) | Модели по активу/классу, календарные фичи | Одна модель на класс активов или на инструмент? У Форекс у брокера нет настоящего объёма — часть фич из 2.2 для него неприменима |

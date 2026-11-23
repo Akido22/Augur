@@ -27,7 +27,7 @@ class SmaCrossParams(BaseModel):
 @register_strategy
 class SmaCross(Strategy):
     name = "sma_cross"
-    version = "sma_cross_v1"
+    version = "1.0.0"
     params_model = SmaCrossParams
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:

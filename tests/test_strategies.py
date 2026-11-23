@@ -51,7 +51,9 @@ def test_registry_lists_and_creates_strategies() -> None:
     by_name = {s["name"]: s for s in list_strategies()}
     assert by_name["sma_cross"]["params"] == {"short": 10, "long": 30}
     assert by_name["sma_cross"]["warmup_bars"] == 31
-    assert by_name["sma_cross"]["version"] == "sma_cross_v1"
+    assert by_name["sma_cross"]["version"] == "1.0.0"
+    assert by_name["sma_cross"]["strategy_version"] == "sma_cross@1.0.0"
+    assert by_name["rsi"]["strategy_version"] == "rsi@1.0.0"
     assert by_name["rsi"]["params"] == {"period": 14, "oversold": 30.0, "overbought": 70.0}
     strat = get_strategy("sma_cross", {"short": "5", "long": "20"})  # строки из CLI
     assert strat.params == {"short": 5, "long": 20}

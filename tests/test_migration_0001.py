@@ -64,7 +64,7 @@ def _insert_audit(conn: sqlite3.Connection, app_version: str = "0.1.0") -> None:
     conn.execute(
         "INSERT INTO decision_audit(id, signal_id, app_version, strategy_version, "
         "ml_model_version, llm_prompt_version, risk_verdict, config_hash, mode) "
-        "VALUES ('01AUD', '01SIG', ?, 'sma_cross_v1', 'n/a', 'n/a', 'REJECTED', 'h', 'PAPER')",
+        "VALUES ('01AUD', '01SIG', ?, 'sma_cross@1.0.0', 'n/a', 'n/a', 'REJECTED', 'h', 'PAPER')",
         (app_version,),
     )
 
@@ -105,7 +105,8 @@ def test_service_tables_time_is_integer_ms(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "INSERT INTO artifacts(kind, version, sha256, path, metadata) "
-        "VALUES ('strategy', 'sma_cross_v1', 'abc', 'artifacts/strategies/sma_cross_v1.json', '{}')"
+        "VALUES ('strategy', 'sma_cross@1.0.0', 'abc', "
+        "'artifacts/strategies/sma_cross@1.0.0.json', '{}')"
     )
     for table, col in (("schema_migrations", "applied_at"), ("artifacts", "created_at")):
         typ = conn.execute(f"SELECT typeof({col}) FROM {table}").fetchone()[0]  # noqa: S608

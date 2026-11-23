@@ -654,7 +654,7 @@ CREATE TABLE fused_signals (
     action                TEXT    NOT NULL CHECK (action IN ('BUY','SELL','CLOSE','REDUCE','HOLD','NO_SIGNAL')),
     strength              REAL    NOT NULL CHECK (strength BETWEEN 0 AND 1),
     reason                TEXT    NOT NULL,
-    explanation_ref       TEXT,
+    explanation_ref       TEXT    NOT NULL,      -- строка-ссылка, НЕ FK (FUSION SPEC §4.6); NOT NULL с 0003_fusion_contract
     risk_flags_json       TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(risk_flags_json)),
     source_breakdown_json TEXT    NOT NULL CHECK (json_valid(source_breakdown_json)),  -- {ml, tech, llm, rules_fired}
     fusion_config_version TEXT    NOT NULL,      -- версия конфига весов/порогов, "fusion-2026.11.1"
@@ -951,6 +951,9 @@ Alpaca нативно поддерживает `client_order_id` — этало�
 `[ДОПУЩЕНИЕ]` Бары передаются ссылкой (`bars_ref` + `data_hash`), Fusion читает их из того же SQLite в read-only режиме или через Data API. Это уменьшает payload и делает вход проверяемым по хешу.
 
 ### 5.3. Выход Fusion (`FusedSignal`)
+
+> **Схема fused_signal** определена в ML_LLM_FUSION_SPEC.md §4.6.
+> Этот раздел описывает только потребительские правила: fallback, TTL, поведение при недоступном Fusion.
 
 ```json
 {

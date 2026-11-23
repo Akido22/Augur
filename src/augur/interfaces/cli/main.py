@@ -235,7 +235,7 @@ def backtest(
         fill_on="close" if fill_on == "close" else "next_open",
     )
     params_s = ",".join(f"{k}={v}" for k, v in strat.params.items())
-    typer.echo(f"strategy:          {strat.name} ({strat.version}) {params_s}")
+    typer.echo(f"strategy:          {strat.strategy_version} {params_s}")
     typer.echo(
         f"data:              {data_source} {asset} {timeframe} {start_d}..{until_d} "
         f"({len(bars)} bars)"

@@ -62,23 +62,27 @@
 
 | Версия | Формат | Семантика |
 |---|---|---|
-| `api_version` | `MAJOR.MINOR` (`1.0`) | Контракт Fusion. MINOR — добавлены необязательные поля. MAJOR — удаление/переименование поля, смена типа или семантики |
-| `db_schema_version` | Целое, монотонно (`1, 2, 3…`) | `MAX(version)` в `schema_migrations`. Одна миграция = +1 |
-| `config_version` | Целое, монотонно | Поле `config_version` в корне конфига. Растёт при любом несовместимом изменении структуры конфига |
+| `api_version` (константа `API_VERSION`) | `MAJOR.MINOR` (`1.0`) | Контракт Fusion. MINOR — добавлены необязательные поля. MAJOR — удаление/переименование поля, смена типа или семантики |
+| `db_schema_version` (константа `DB_SCHEMA_VERSION`) | Целое, монотонно (`1, 2, 3…`) | `MAX(version)` в `schema_migrations`. Одна миграция = +1 |
+| `config_version` (константа `CONFIG_VERSION`) | Целое, монотонно | Поле `config_version` в корне конфига. Растёт при любом несовместимом изменении структуры конфига |
 
-Константы ожидаемых версий — в одном модуле:
+Константы ожидаемых версий — в одном модуле (фактические имена в коде):
 
 ```python
 # src/augur/versions.py
-FUSION_API_VERSION = "1.0"   # контракт Fusion, который реализует этот код
-EXPECTED_DB_SCHEMA = 3       # схема, которую ожидает этот код
-CONFIG_VERSION = 2           # формат конфига, который читает этот код
+DB_SCHEMA_VERSION: int = 3   # схема, которую ожидает этот код (= последний файл миграции)
+API_VERSION: str = "1.0"     # контракт Fusion (fused_signal), который реализует этот код
+CONFIG_VERSION: int = 1      # формат конфига, который читает этот код
+
+__all__ = ["DB_SCHEMA_VERSION", "API_VERSION", "CONFIG_VERSION"]
 ```
+
+`APP_VERSION` в этом модуле нет: версия приложения читается через `importlib.metadata` (§2.1).
 
 Поведение при старте:
 
-- `db_schema_version < EXPECTED_DB_SCHEMA` → применить миграции (с бэкапом, §8.2).
-- `db_schema_version > EXPECTED_DB_SCHEMA` → старт только если все лишние миграции имеют `compat = 'expand'` (§8.3), иначе отказ.
+- `db_schema_version < DB_SCHEMA_VERSION` → применить миграции (с бэкапом, §8.2).
+- `db_schema_version > DB_SCHEMA_VERSION` → старт только если все лишние миграции имеют `compat = 'expand'` (§8.3), иначе отказ.
 - `config_version` ≠ `CONFIG_VERSION` → мигратор конфига N-1 → N или отказ; конфиг новее кода → отказ.
 - Входящий сигнал Fusion с другим MAJOR `api_version` → отклоняется.
 
@@ -97,13 +101,13 @@ CREATE TABLE schema_migrations (
 
 | Версия | Формат | Что фиксирует |
 |---|---|---|
-| `strategy_version` | `<имя>_v<N>` (`strategy_v2`, `breakout_v1`) | Код стратегии + все параметры |
+| `strategy_version` | `<имя>@<SemVer>` (`sma_cross@1.0.0`, `rsi@1.0.0`) | Код стратегии + все параметры. В коде: `Strategy.version` — SemVer, `strategy_version = f"{name}@{version}"` |
 | `ml_model_version` | `<алгоритм>_v<N>` (`lightgbm_v3`) | Веса, набор признаков, диапазон обучающих данных, коммит кода обучения |
 | `llm_prompt_version` | `prompt_<назначение>_v<N>` (`prompt_news_v1`) | Текст промпта + ID LLM-модели + параметры генерации (temperature, max_tokens) |
 
 Правила артефактов:
 
-- Артефакт **неизменяем**. Любое изменение (один параметр, одна строка промпта, смена LLM-модели) = новая версия `N+1`.
+- Артефакт **неизменяем**. Любое изменение (один параметр, одна строка промпта, смена LLM-модели) = новая версия (`_v<N>` → `N+1`; для стратегий — новая SemVer в `<имя>@X.Y.Z`).
 - Каждый артефакт регистрируется в реестре с хешем; при загрузке хеш проверяется.
 - Удаление зарегистрированного артефакта **ЗАПРЕЩЕНО** (иначе теряется воспроизводимость старых ордеров).
 - Значения `latest`, `current`, `dev` в качестве версии **ЗАПРЕЩЕНЫ**.
@@ -126,8 +130,8 @@ CREATE TABLE artifacts (
 | Уровень | Версия | Где хранится | Кто увеличивает | Когда |
 |---|---|---|---|---|
 | Приложение | `app_version` | `pyproject.toml`; git tag `vX.Y.Z`; CHANGELOG | Release-владелец (агент через skill, подтверждает человек) | В release-PR `develop → main` |
-| Компонент | `api_version` | `versions.py`, спецификация Fusion, поле каждого сигнала | Автор изменения контракта | В PR, меняющем контракт Fusion |
-| Компонент | `db_schema_version` | Таблица `schema_migrations`; `EXPECTED_DB_SCHEMA` | Автор миграции | В PR, добавляющем файл `src/augur/db/migrations/NNNN_*.sql` |
+| Компонент | `api_version` | `API_VERSION` в `versions.py`, спецификация Fusion, поле каждого сигнала | Автор изменения контракта | В PR, меняющем контракт Fusion |
+| Компонент | `db_schema_version` | Таблица `schema_migrations`; `DB_SCHEMA_VERSION` | Автор миграции | В PR, добавляющем файл `src/augur/db/migrations/NNNN_*.sql` |
 | Компонент | `config_version` | Корень конфига; `CONFIG_VERSION` | Автор изменения конфига | В PR с несовместимым изменением структуры конфига |
 | Артефакт | `strategy_version` | Реестр `artifacts`, `artifacts/strategies/` | Автор стратегии | При любом изменении кода или параметров стратегии |
 | Артефакт | `ml_model_version` | Реестр `artifacts`, `artifacts/ml/` | Пайплайн обучения (автоматически) | При каждом переобучении / смене признаков |
@@ -198,14 +202,14 @@ CREATE TABLE artifacts (
 |---|---|---|---|
 | **0.1.0** | Каркас | Пакет, CI, мигратор, загрузчик конфига, `augur --version` | `db_schema` → 1; `config` → 1 |
 | **0.2.0** | Data Layer | Хранилище OHLCV (таблица `ohlcv`), адаптеры Forex/крипто/акции (только чтение), идемпотентная загрузка истории | `db_schema` +1 (`0002_ohlcv`); `config` +1 (источники данных) |
-| **0.3.0** | Стратегии + бэктест | Интерфейс стратегии, реестр, детерминированный бэктест с отчётом, Signal Engine | `db_schema` +N (signals, backtest_runs); первый `strategy_v1` |
-| **0.4.0** | Fusion-контракт | Спецификация и валидация контракта, stub-реализация Fusion, таблица fused_signals | `api_version` → 1.0; `db_schema` +1 |
+| **0.3.0** | Стратегии + бэктест | Strategy Framework (интерфейс, реестр), детерминированный Backtest Engine, метрики, CLI `strategies list` / `backtest` | `db_schema` без изменений; первые стратегии `sma_cross@1.0.0`, `rsi@1.0.0`. Таблица `backtest_runs` — отложено, не реализовано в 0.3.0 |
+| **0.4.0** | Fusion-контракт + Signal Engine | Signal Engine (`StrategyContext`, `StrategySignal`, `generate_signals`), таблица `signals` (создана в `0001_core`), спецификация и валидация контракта, stub-реализация Fusion, таблица `fused_signals` (`0003_fusion_contract`) | `api_version` → 1.0; `db_schema` +1; `config` → 1 (`CONFIG_VERSION`) |
 | **0.5.0** | Risk Gate | Лимиты (позиция, дневной убыток, экспозиция), вердикты, таблица `decision_audit` | `db_schema` +1; `config` +1 (лимиты риска) |
 | **0.6.0** | PAPER | Симулятор исполнения, таблица orders, жёсткая проверка полноты версий перед ордером (§6.2) | `db_schema` +N (orders, fills); `config` +1 (режим исполнения) |
 | **0.7.0** | MICRO_LIVE | Реальное исполнение с микролимитами, kill switch, сверка позиций с брокером | `config` +1 (ключи, микролимиты); `db_schema` по необходимости |
 | **0.8.0** | News | Сбор и нормализация новостей, LLM-оценка новостей | `db_schema` +N (news); первый `prompt_news_v1`; `api_version` 1.1 (поле news_score) |
 | **0.9.0** | GUI/CLI | Полный CLI, GUI мониторинга, просмотр цепочки решения по ордеру | `config` по необходимости |
-| **0.10.0** | ML+LLM | Реальная реализация Fusion: ML-модель + LLM, реестр моделей, replay-тест | `ml_model` с `lightgbm_v1`; новые `strategy_vN`, `prompt_*_vN`; `api_version` 1.x или **BREAKING** 2.0 |
+| **0.10.0** | ML+LLM | Реальная реализация Fusion: ML-модель + LLM, реестр моделей, replay-тест | `ml_model` с `lightgbm_v1`; новые `<стратегия>@X.Y.Z`, `prompt_*_vN`; `api_version` 1.x или **BREAKING** 2.0 |
 | **0.11.0** | FULL_AUTO | Автоторговля без подтверждения человека в рамках лимитов Risk Gate, алертинг | `config` +1 (режим FULL_AUTO); `db_schema` по необходимости |
 | **1.0.0** | Stable | Выполнены все условия §1.3 | `api_version` заморожен на 1.x/2.x; далее строгий SemVer |
 
@@ -245,7 +249,7 @@ CREATE TABLE artifacts (
 | Переобучена модель | — (релиз не нужен) | `ml_model` +1 |
 | Изменён текст промпта | — | `llm_prompt` +1 |
 | Изменены параметры стратегии | — | `strategy` +1 |
-| Новый тип стратегии в коде | MINOR | новый `<имя>_v1` |
+| Новый тип стратегии в коде | MINOR | новый `<имя>@1.0.0` |
 | Переименован ключ конфига | MINOR (BREAKING в 0.x) | `config` +1 |
 
 Новая версия артефакта не требует релиза приложения, но её активация в боевом конфиге фиксируется в CHANGELOG (§3.2) и автоматически — в `decision_audit`.
@@ -346,7 +350,7 @@ def assert_auditable(rec: "DecisionAuditRecord") -> None:
 
 ```text
 Augur 0.10.0                                  app_version
- └─ strategy_v2         → signal #8812        strategy_version
+ └─ sma_cross@1.0.0     → signal #8812        strategy_version
      ├─ lightgbm_v3                           ml_model_version
      └─ prompt_news_v1                        llm_prompt_version
          → fused_signal #4410 (api_version 1.1)
@@ -566,9 +570,9 @@ description: Версионирование и релизы Augur. Исполь�
    |---|---|
    | Багфикс без схемы БД | `fix:`, запись в «Исправлено» |
    | Новая фича | `feat:`, запись в «Добавлено» |
-   | Изменение схемы БД | новый файл `src/augur/db/migrations/NNNN_<имя>.sql` с `-- compat: expand|contract`, `EXPECTED_DB_SCHEMA += 1` |
+   | Изменение схемы БД | новый файл `src/augur/db/migrations/NNNN_<имя>.sql` с `-- compat: expand|contract`, `DB_SCHEMA_VERSION += 1` |
    | `compat: contract`, удаление поля контракта, переименование ключа конфига | `breaking:` / `!`, запись с `**BREAKING:**` + путь миграции |
-   | Контракт Fusion | обновить `FUSION_API_VERSION` и спецификацию |
+   | Контракт Fusion | обновить `API_VERSION` и спецификацию |
    | Формат конфига | `CONFIG_VERSION += 1`, мигратор конфига N-1 → N |
    | Новая версия артефакта | новый файл `<имя>_v<N+1>`, регистрация в `artifacts` с sha256 |
 2. Добавь запись в `## [Unreleased]` CHANGELOG.md в том же коммите/PR.
@@ -593,7 +597,7 @@ augur doctor
 ## Пример
 Задача: «Добавь в orders колонку client_order_id».
 - `src/augur/db/migrations/0004_orders_client_id.sql`, `-- compat: expand`
-- `EXPECTED_DB_SCHEMA = 4`
+- `DB_SCHEMA_VERSION = 4`
 - Коммит: `feat(db): добавить client_order_id в orders`
 - CHANGELOG `[Unreleased]` → «Добавлено»: «Колонка `orders.client_order_id` для идемпотентной отправки ордеров (db_schema_version 4).»
 
@@ -727,10 +731,10 @@ git show v0.2.0 --no-patch  # тело аннотации, автор, дата
 - [ ] Секция `[Unreleased]` перенесена в `## [X.Y.Z] — YYYY-MM-DD`; ссылки сравнения обновлены.
 - [ ] Строка `**Компоненты:**` отражает все изменившиеся версии.
 - [ ] Каждое ломающее изменение помечено `**BREAKING:**` и содержит путь миграции.
-- [ ] Новые миграции имеют `-- compat: expand|contract`; `EXPECTED_DB_SCHEMA` обновлён; checksum применённых миграций не изменились.
+- [ ] Новые миграции имеют `-- compat: expand|contract`; `DB_SCHEMA_VERSION` обновлён; checksum применённых миграций не изменились.
 - [ ] Миграции проходят с нуля и на копии боевой БД; бэкап перед миграцией создаётся автоматически.
 - [ ] `CONFIG_VERSION` и мигратор конфига обновлены при изменении формата конфига.
-- [ ] `FUSION_API_VERSION` и спецификация Fusion согласованы.
+- [ ] `API_VERSION` и спецификация Fusion согласованы.
 - [ ] Все активные артефакты в конфиге зарегистрированы в `artifacts`, хеши совпадают с файлами.
 - [ ] Тест «ордер без полной версии не отправляется» зелёный; replay-тест на эталонных решениях зелёный.
 - [ ] `augur doctor` на стенде PAPER без ошибок.

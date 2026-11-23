@@ -47,8 +47,9 @@ class StrategyParamsError(ValueError):
 class Strategy(ABC):
     """Базовый класс стратегии.
 
-    Подкласс задаёт `name`, `version` (`<имя>_v<N>`, VERSIONING.md §2.3), `params_model`
+    Подкласс задаёт `name`, `version` (SemVer `X.Y.Z`, VERSIONING.md §2.3), `params_model`
     (Pydantic-модель параметров с дефолтами) и реализует `warmup_bars` и `on_bar`.
+    Версия артефакта — `strategy_version = f"{name}@{version}"` (`sma_cross@1.0.0`).
     """
 
     name: ClassVar[str]
@@ -67,6 +68,11 @@ class Strategy(ABC):
             self.config: BaseModel = self.params_model.model_validate(params or {})
         except ValidationError as e:
             raise StrategyParamsError(f"{self.name}: invalid params: {e}") from e
+
+    @property
+    def strategy_version(self) -> str:
+        """Версия артефакта стратегии `name@SemVer` (VERSIONING.md §2.3)."""
+        return f"{self.name}@{self.version}"
 
     @property
     def params(self) -> dict[str, Any]:

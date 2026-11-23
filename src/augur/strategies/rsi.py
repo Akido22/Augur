@@ -33,7 +33,7 @@ class RsiParams(BaseModel):
 @register_strategy
 class RsiStrategy(Strategy):
     name = "rsi"
-    version = "rsi_v1"
+    version = "1.0.0"
     params_model = RsiParams
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:

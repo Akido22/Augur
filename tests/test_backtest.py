@@ -20,7 +20,7 @@ class FnStrategy(Strategy):
     """Тестовая стратегия из функции (не регистрируется в реестре)."""
 
     name = "fn"
-    version = "fn_v1"
+    version = "1.0.0"
     params_model = _NoParams
 
     def __init__(

@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-23
+
+**Компоненты:** db_schema_version 1 → 2 · api_version — · артефакты —
+
 ### Добавлено
 
 - Протокол `MarketAdapter` (async) и DTO `OrderRequest`, `OrderAck`, `AccountState`, `InstrumentSpec`,
@@ -34,6 +38,7 @@
 
 ### Изменено
 
+- db_schema_version: 1 → 2 (миграция `0002_ohlcv`).
 - ARCHITECTURE.md §2.3, §4.1: время в `Bar`, `Tick`, `AccountState` и диапазон `get_historical` — int ms UTC.
 - VERSIONING.md §4: хранилище 0.2.0 — таблица `ohlcv` вместо `instruments`/`candles`.
 

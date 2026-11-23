@@ -7,6 +7,50 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-23
+
+**Компоненты:** db_schema_version 2 → 3 · api_version 1.0 (контракт применён) · config_version 1 (`CONFIG_VERSION`) · артефакты `sma_cross@1.0.0`, `rsi@1.0.0`
+
+### Добавлено
+
+- Fusion-контракт `FusedSignal` (Pydantic v2, `extra="forbid"`, frozen) по ML_LLM_FUSION_SPEC.md §4.6:
+  проверки `api_version == versions.API_VERSION`, непустой `explanation_ref`, `signal_id` — UUID,
+  `strength` ∈ [0, 1], `action` — 6 значений `SignalAction`, `expires_at > timestamp`;
+  `RiskFlag(code, severity: low|medium|high)`.
+- `FusionClient` Protocol, `FusionRequest`, `StubFusionClient` (без ML/LLM): HOLD при наличии
+  технического сигнала, иначе NO_SIGNAL; `strength=0`, `explanation_ref="fusion_stub"`,
+  `fusion_config_version="stub-0.4.0"`, TTL — половина бара; `signal_id = uuid5(idempotency_key)`.
+- Signal Engine (`augur.signals`): `StrategyContext`, `StrategySignal` (ULID `signal_id`,
+  `params_hash`, `data_hash` по окну `warmup_bars`), `SignalEngine.generate_signals()` и
+  `async process()` — невалидный/просроченный выход Fusion отбрасывается с `FUSION_INVALID` в
+  `audit_log`, сбой клиента — `FUSION_FALLBACK` (ML-disabled).
+- `Strategy.generate_signals(ctx)` как обёртка над `on_bar`; `Strategy.strategy_version`.
+- Встроенный генератор ULID `augur.ids` (без новых зависимостей).
+- Миграция `0003_fusion_contract.sql`: `fused_signals` пересоздана с `explanation_ref NOT NULL`.
+- `CONFIG_VERSION` в `versions.py`.
+
+### Изменено
+
+- **BREAKING:** `fused_signals.explanation_ref` — NOT NULL (миграция `0003_fusion_contract`,
+  `compat: contract`). Путь миграции: `augur db migrate` (бэкап снимается автоматически); строк в
+  `fused_signals` на 0.4.0 нет. Писатели обязаны передавать `"fusion_stub"` /
+  `"decision_audit:<ulid>"`.
+- **BREAKING:** формат `strategy_version` — `name@SemVer` (`sma_cross@1.0.0`, `rsi@1.0.0`) вместо
+  `<имя>_v<N>`; `Strategy.version` — SemVer `X.Y.Z` (проверяется при регистрации). Записей
+  `decision_audit` со старым форматом нет.
+- Режимы PAPER/MICRO_LIVE/FULL_AUTO — единые имена во всех документах.
+- VERSIONING.md §2.2/§2.3/§4 приведены к фактическим именам (`DB_SCHEMA_VERSION`, `API_VERSION`,
+  `CONFIG_VERSION`) и фактическому составу 0.3.0/0.4.0.
+- ML_LLM_FUSION_SPEC.md §4.6 объявлен источником истины схемы `fused_signal` (добавлены
+  `api_version`, `action` после маппинга в `SignalAction`, `risk_flags` как `{code, severity}`);
+  §7 — DDL по миграциям 0001 + 0003. ARCHITECTURE.md §5.3 ссылается на §4.6.
+- `DB_SCHEMA_VERSION`: 2 → 3. `augur backtest` выводит `strategy_version`.
+
+### Примечания
+
+- `explanation_ref`: строка, НЕ FK. 0.4.0: `"fusion_stub"`; 0.5.0: `"decision_audit:<ulid>"`.
+- Расхождение с ARCH §2.5/§6.1 закрыто: `generate_signals(ctx)` реализован как обёртка над `on_bar`.
+
 ## [0.3.1] - 2026-11-23
 
 **Компоненты:** db_schema_version 2 (без изменений) · api_version 1.0 (константа, применение — 0.4.0) · артефакты —

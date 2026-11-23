@@ -7,6 +7,30 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-23
+
+**Компоненты:** db_schema_version 2 (без изменений) · api_version 1.0 (константа, применение — 0.4.0) · артефакты —
+
+### Добавлено
+
+- Централизованные версии компонентов в `src/augur/versions.py` (`DB_SCHEMA_VERSION`, `API_VERSION`).
+  Имена отличаются от VERSIONING.md §2.2 (`EXPECTED_DB_SCHEMA`, `FUSION_API_VERSION`) — документ
+  выравнивается в Батче B.
+- `SchemaVersionMismatchError` в `migrator.py` — защита от несоответствия БД и кода:
+  файл миграции новее `DB_SCHEMA_VERSION` — отказ до изменения БД; схема после `migrate` ниже
+  ожидаемой — «Примените миграции: augur db migrate»; БД новее кода с не-`expand` миграцией —
+  «Обновите пакет augur». Лишние `expand`-миграции в БД по-прежнему допустимы (VERSIONING.md §2.2).
+  Параметр `Migrator(expected_schema=...)`, по умолчанию `DB_SCHEMA_VERSION`.
+- Тест `test_versions.py`: константа совпадает с последним файлом миграции, формат `API_VERSION`,
+  сценарии `SchemaVersionMismatchError`.
+
+### Изменено
+
+- `augur --version` выводит db_schema и api: `augur 0.3.1 (db_schema: 2, api: 1.0)`.
+- БД новее кода с `contract`-миграцией теперь даёт `SchemaVersionMismatchError` вместо
+  `UnknownAppliedMigrationError` (оба — подклассы `MigrationError`; `UnknownAppliedMigrationError`
+  остаётся для применённой `contract`-миграции без файла в пределах ожидаемой схемы).
+
 ## [0.3.0] - 2026-11-23
 
 **Компоненты:** db_schema_version 2 (без изменений) · api_version — · артефакты `sma_cross_v1`, `rsi_v1`

@@ -13,7 +13,7 @@ from augur.db.migrator import (
     MigrationError,
     MigrationFailedError,
     Migrator,
-    UnknownAppliedMigrationError,
+    SchemaVersionMismatchError,
     file_checksum,
 )
 from augur.interfaces.cli.main import app
@@ -29,8 +29,11 @@ def migrations(tmp_path: Path) -> Path:
     return target
 
 
-def _migrator(migrations: Path, tmp_path: Path) -> Migrator:
-    return Migrator(migrations, backup_dir=tmp_path / "backups", app_version="0.1.0")
+def _migrator(migrations: Path, tmp_path: Path, expected: int = 2) -> Migrator:
+    """`expected` — DB_SCHEMA_VERSION «кода»; тесты с 0003+ на диске поднимают его."""
+    return Migrator(
+        migrations, backup_dir=tmp_path / "backups", app_version="0.1.0", expected_schema=expected
+    )
 
 
 def _rows(db: Path) -> list[tuple[int, str, str, str, str, int]]:
@@ -81,8 +84,8 @@ def test_status_before_and_after(migrations: Path, tmp_path: Path) -> None:
 
 def test_checksum_mismatch_blocks_migrate(migrations: Path, tmp_path: Path) -> None:
     db = str(tmp_path / "augur.db")
-    m = _migrator(migrations, tmp_path)
-    m.migrate(db)
+    _migrator(migrations, tmp_path).migrate(db)
+    m = _migrator(migrations, tmp_path, expected=3)
     path = migrations / "0002_ohlcv.sql"
     path.write_text(path.read_text("utf-8") + "\n-- правка истории\n", encoding="utf-8")
     (migrations / "0003_new.sql").write_text(
@@ -107,7 +110,7 @@ def test_failed_migration_rolls_back_only_itself(migrations: Path, tmp_path: Pat
         "-- compat: expand\nCREATE TABLE after_broken (x INTEGER) STRICT;\n", encoding="utf-8"
     )
     with pytest.raises(MigrationFailedError, match="0003_broken"):
-        _migrator(migrations, tmp_path).migrate(db)
+        _migrator(migrations, tmp_path, expected=4).migrate(db)
     assert [r[1] for r in _rows(Path(db))] == EXPECTED
     conn = sqlite3.connect(db)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -118,12 +121,11 @@ def test_failed_migration_rolls_back_only_itself(migrations: Path, tmp_path: Pat
 
 def test_backup_created_before_migration(migrations: Path, tmp_path: Path) -> None:
     db = str(tmp_path / "augur.db")
-    m = _migrator(migrations, tmp_path)
-    m.migrate(db)
+    _migrator(migrations, tmp_path).migrate(db)
     (migrations / "0003_extra.sql").write_text(
         "-- compat: expand\nCREATE TABLE extra (x INTEGER) STRICT;\n", encoding="utf-8"
     )
-    result = m.migrate(db)
+    result = _migrator(migrations, tmp_path, expected=3).migrate(db)
     assert result.applied == ["0003_extra"]
     backups = sorted((tmp_path / "backups").glob("augur_pre_v0.1.0_schema*.db"))
     assert len(backups) == 2  # перед первой миграцией и перед 0003
@@ -136,11 +138,11 @@ def test_backup_created_before_migration(migrations: Path, tmp_path: Path) -> No
 
 def test_db_newer_than_code(migrations: Path, tmp_path: Path) -> None:
     db = str(tmp_path / "augur.db")
-    m = _migrator(migrations, tmp_path)
     extra = migrations / "0003_extra.sql"
     extra.write_text("-- compat: expand\nCREATE TABLE e (x INTEGER) STRICT;\n", encoding="utf-8")
-    m.migrate(db)
+    _migrator(migrations, tmp_path, expected=3).migrate(db)  # «новый» код применил 0003
     extra.unlink()
+    m = _migrator(migrations, tmp_path)  # откат кода: ожидает схему 2
     assert m.migrate(db).applied == []  # expand-миграция из будущего — совместимо
     assert m.status(db)[-1].state == "missing_file"
 
@@ -148,7 +150,7 @@ def test_db_newer_than_code(migrations: Path, tmp_path: Path) -> None:
     conn.execute("UPDATE schema_migrations SET compat='contract' WHERE version=3")
     conn.commit()
     conn.close()
-    with pytest.raises(UnknownAppliedMigrationError):
+    with pytest.raises(SchemaVersionMismatchError, match="DB schema 3 > code expects 2"):
         m.migrate(db)
 
 

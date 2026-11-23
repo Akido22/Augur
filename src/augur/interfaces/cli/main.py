@@ -20,6 +20,7 @@ from augur.strategies import (
     get_strategy,
     list_strategies,
 )
+from augur.versions import API_VERSION, DB_SCHEMA_VERSION
 
 app = typer.Typer(name="augur", help="Augur — гибридная торговая система ML+LLM.")
 db_app = typer.Typer(help="Схема SQLite: миграции и бэкапы.", no_args_is_help=True)
@@ -33,10 +34,15 @@ DEFAULT_DB_PATH: str = Settings.model_fields["db_path"].default
 DbOption = typer.Option(DEFAULT_DB_PATH, "--db", help="Путь к файлу SQLite.")
 
 
+def version_line() -> str:
+    """`augur 0.3.1 (db_schema: 2, api: 1.0)` — версии кода, без чтения БД."""
+    return f"augur {__version__} (db_schema: {DB_SCHEMA_VERSION}, api: {API_VERSION})"
+
+
 def _version_callback(value: bool) -> None:
-    """Печатает версию приложения и завершает работу."""
+    """Печатает версии приложения, ожидаемой схемы БД и контракта Fusion и завершает работу."""
     if value:
-        typer.echo(f"augur {__version__}")
+        typer.echo(version_line())
         raise typer.Exit()
 
 

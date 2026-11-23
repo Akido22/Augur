@@ -1,4 +1,4 @@
-"""`augur --version` печатает версию из pyproject.toml (через importlib.metadata)."""
+"""`augur --version`: версия из pyproject.toml + db_schema и api из augur.versions."""
 
 import subprocess
 import sys
@@ -10,8 +10,13 @@ from typer.testing import CliRunner
 
 import augur
 from augur.interfaces.cli.main import app
+from augur.versions import API_VERSION, DB_SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _expected_line() -> str:
+    return f"augur {_pyproject_version()} (db_schema: {DB_SCHEMA_VERSION}, api: {API_VERSION})"
 
 
 def _pyproject_version() -> str:
@@ -26,7 +31,7 @@ def test_package_version_matches_pyproject() -> None:
 def test_cli_version_option() -> None:
     result = CliRunner().invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert result.output.strip() == f"augur {_pyproject_version()}"
+    assert result.output.strip() == _expected_line()
 
 
 def test_cli_version_via_module_entrypoint() -> None:
@@ -38,4 +43,4 @@ def test_cli_version_via_module_entrypoint() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == f"augur {_pyproject_version()}"
+    assert result.stdout.strip() == _expected_line()

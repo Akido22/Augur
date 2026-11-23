@@ -9,6 +9,9 @@
   миграция → `ChecksumMismatchError`.
 - Перед применением ожидающих миграций снимается бэкап (`VACUUM INTO`, VERSIONING §8.2).
 - Down-миграций нет (VERSIONING §8.1).
+- Схема сверяется с `augur.versions.DB_SCHEMA_VERSION` (VERSIONING §2.2):
+  файл миграции новее константы — отказ до изменения БД; после применения схема ниже
+  ожидаемой — отказ; БД новее кода допускается, только если все лишние миграции `expand`.
 """
 
 import hashlib
@@ -20,10 +23,25 @@ from pathlib import Path
 from typing import Literal
 
 from augur import __version__
+from augur.versions import DB_SCHEMA_VERSION
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _FILENAME = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")
 _COMPAT = re.compile(r"^--\s*compat:\s*(expand|contract)\s*$", re.MULTILINE)
+
+__all__ = [
+    "MIGRATIONS_DIR",
+    "ChecksumMismatchError",
+    "MigrationError",
+    "MigrationFailedError",
+    "MigrationFile",
+    "MigrationResult",
+    "MigrationStatus",
+    "Migrator",
+    "SchemaVersionMismatchError",
+    "UnknownAppliedMigrationError",
+    "file_checksum",
+]
 
 
 class MigrationError(Exception):
@@ -40,6 +58,10 @@ class MigrationFailedError(MigrationError):
 
 class UnknownAppliedMigrationError(MigrationError):
     """В БД есть contract-миграция, которой нет в коде (БД новее кода)."""
+
+
+class SchemaVersionMismatchError(MigrationError):
+    """Версия схемы БД или файлов миграций не совпадает с `DB_SCHEMA_VERSION` кода."""
 
 
 @dataclass(frozen=True)
@@ -98,16 +120,19 @@ class Migrator:
         *,
         backup_dir: Path = Path("backups"),
         app_version: str = __version__,
+        expected_schema: int = DB_SCHEMA_VERSION,
     ) -> None:
         """
         Args:
             migrations_dir: каталог с `NNNN_*.sql`.
             backup_dir: куда класть бэкапы (по умолчанию `backups/` от текущего каталога).
             app_version: версия Augur, пишется в `schema_migrations.app_version`.
+            expected_schema: схема, которую ожидает код (`augur.versions.DB_SCHEMA_VERSION`).
         """
         self._dir = migrations_dir
         self._backup_dir = backup_dir
         self._app_version = app_version
+        self._expected = expected_schema
 
     # --- чтение -----------------------------------------------------------------
 
@@ -200,6 +225,30 @@ class Migrator:
                     "применённые миграции не редактируются — создайте новую"
                 )
 
+    def _check_files(self, files: list[MigrationFile]) -> None:
+        """Файл миграции новее константы — код и миграции рассинхронизированы."""
+        newer = [f.name for f in files if f.version > self._expected]
+        if newer:
+            raise SchemaVersionMismatchError(
+                f"migration {', '.join(newer)} on disk > code expects {self._expected}. "
+                "Обновите DB_SCHEMA_VERSION в augur/versions.py"
+            )
+
+    def _check_db_not_newer(self, applied: dict[int, tuple[str, str, int, str]]) -> None:
+        """БД новее кода — допустимо, только если все лишние миграции expand (VERSIONING §2.2)."""
+        extra = {v: row for v, row in applied.items() if v > self._expected}
+        if any(compat != "expand" for _, _, _, compat in extra.values()):
+            raise SchemaVersionMismatchError(
+                f"DB schema {max(extra)} > code expects {self._expected}. Обновите пакет augur"
+            )
+
+    def _check_db_not_older(self, schema: int) -> None:
+        if schema < self._expected:
+            raise SchemaVersionMismatchError(
+                f"DB schema {schema} < expected {self._expected}. "
+                "Примените миграции: augur db migrate"
+            )
+
     def backup_before_migrate(self, db_path: str) -> str:
         """Консистентная копия БД через `VACUUM INTO`.
 
@@ -227,20 +276,26 @@ class Migrator:
             ChecksumMismatchError: изменён файл применённой миграции (ничего не применяется).
             UnknownAppliedMigrationError: БД новее кода и содержит contract-миграцию.
             MigrationFailedError: миграция упала; она откачена, предыдущие сохранены.
+            SchemaVersionMismatchError: файл миграции новее `DB_SCHEMA_VERSION`; БД новее кода
+                с не-expand миграцией; после применения схема ниже `DB_SCHEMA_VERSION`.
             MigrationError: версия приложения неизвестна (`+unknown`) — запуск без установки.
         """
         if self._app_version.endswith("+unknown"):
             raise MigrationError("версия приложения неизвестна: выполните pip install -e .")
         files = self.discover()
+        self._check_files(files)
         conn = _connect(db_path)
         try:
             applied = self._applied(conn)
         finally:
             conn.close()
+        self._check_db_not_newer(applied)
         self._verify(files, applied)
         pending = [f for f in files if f.version not in applied]
         if not pending:
-            return MigrationResult([], None, max(applied, default=0))
+            schema = max(applied, default=0)
+            self._check_db_not_older(schema)
+            return MigrationResult([], None, schema)
 
         backup = self.backup_before_migrate(db_path)
         done: list[str] = []
@@ -268,4 +323,5 @@ class Migrator:
             schema = max(self._applied(conn), default=0)
         finally:
             conn.close()
+        self._check_db_not_older(schema)
         return MigrationResult(done, backup, schema)

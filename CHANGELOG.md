@@ -7,6 +7,29 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-23
+
+**Компоненты:** db_schema_version 2 (без изменений) · api_version — · артефакты `sma_cross_v1`, `rsi_v1`
+
+### Добавлено
+
+- Strategy Framework: базовый класс `Strategy` (`name`, `version`, `params_model`, `warmup_bars`,
+  `on_bar(bar, history) -> Signal | None`), реестр (`register_strategy`, `get_strategy`,
+  `list_strategies`), Pydantic `Signal` (`action` — 6 значений `SignalAction`, `strength` ∈ [0, 1],
+  `reason`, `timestamp` в ms). Параметры валидируются `params_model`, неизвестные ключи отклоняются.
+  `StrategySignal`/`StrategyContext` из ARCHITECTURE.md §2.5 — вместе с Signal Engine.
+- Классические стратегии: SMA Crossover (`sma_cross_v1`, short=10/long=30), RSI (`rsi_v1`,
+  период 14, 30/70, Уайлдер на окне 4 × period). Индикаторы — на чистом Python, только закрытые бары.
+- Backtest Engine: bar-by-bar без look-ahead (стратегия видит только `data[:i]` и текущий закрытый бар),
+  комиссия и проскальзывание в процентах, одна позиция на весь капитал (long/short без переворота,
+  REDUCE — половина позиции), закрытие на последнем баре, equity curve по close.
+  Исполнение `fill_on="close"` (по умолчанию) или `"next_open"` (ARCHITECTURE.md §6.3).
+- Метрики (stdlib `math`): Total/Annualized Return, Sharpe, Sortino (rf=0), Max Drawdown, Win Rate,
+  Profit Factor, число сделок, средняя сделка.
+- CLI: `augur strategies list`, `augur backtest` (`--strategy --params --asset --timeframe --since
+  --until --data-source paper --cash --commission --slippage --fill-on --seed`); данные — `PaperAdapter`,
+  ордера не отправляются.
+
 ## [0.2.0] - 2026-11-23
 
 **Компоненты:** db_schema_version 1 → 2 · api_version — · артефакты —

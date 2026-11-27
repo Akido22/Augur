@@ -312,12 +312,12 @@ class SignalReady(BaseModel, frozen=True):
     action: SignalAction
     strength: float                      # [0, 1]
     source: Literal["classic", "fusion", "classic_fallback"]
-    explanation_ref: str | None          # ссылка на объяснение (fused_signals.id / llm ref) [→ FUSION SPEC]
+    explanation_ref: str | None          # source="fusion": FusedSignal.explanation_ref (строка-ссылка, не FK, FUSION SPEC §4.6); classic/classic_fallback: None
     risk_flags: list[str]                # напр. ["news_negative", "high_vol", "ml_disabled"]
     strategy_signal_ids: list[str]
     fused_signal_id: str | None
     created_at: datetime
-    expires_at: datetime                 # created_at + ttl_seconds
+    expires_at: datetime                 # source="fusion": FusedSignal.expires_at; classic: created_at + ½ бара (FUSION SPEC §6.3)
     stop_loss: Decimal | None = None
     take_profit: Decimal | None = None
 
@@ -887,7 +887,8 @@ Alpaca нативно поддерживает `client_order_id` — этало�
 
 | Вопрос | Этот документ | `ML_LLM_FUSION_SPEC.md` |
 |---|---|---|
-| Формат входа/выхода Fusion | ✅ | ссылается сюда |
+| Формат входа Fusion (`FusionRequest`, п. 5.2) | ✅ | ссылается сюда |
+| Схема выхода `fused_signal` | ссылается (п. 5.3) | ✅ §4.6 — источник истины |
 | Поведение Signal Engine при сбое Fusion | ✅ | — |
 | Прохождение fused_signal через Risk Gate | ✅ | — |
 | Таблицы `fused_signals`, `decision_audit` | ✅ | читает |
@@ -1134,7 +1135,7 @@ class BacktestEngine:
 
 Метрики (`BacktestMetrics`): total return, CAGR, **Sharpe** (annualized, rf=0 по умолчанию), **Sortino**, **max drawdown** (% и длительность), **win rate**, **profit factor**, avg win/loss, expectancy, число сделок, exposure, turnover, издержки в % от PnL.
 
-LLM в бэктесте: `fusion_mode="disabled"` (по умолчанию) или `"cached"` — Fusion отвечает из кэша по `request_id`/хешу входа; промах кэша = ошибка прогона (не живой вызов). Детали кэша — `[→ FUSION SPEC]`.
+LLM в бэктесте: `fusion_mode="disabled"` (по умолчанию) или `"cached"` — Fusion отвечает из кэша по `idempotency_key`/хешу входа; промах кэша = ошибка прогона (не живой вызов). Детали кэша — `[→ FUSION SPEC]`.
 
 Результаты бэктестов сохраняются в `backtest_runs` (id, config_json, config_hash, data_hash, code_version, metrics_json, created_ts) — `[ДОПУЩЕНИЕ: дополнительная таблица, не в списке ТЗ]`.
 
@@ -1325,7 +1326,7 @@ Kill switch доступен: CLI `augur kill-switch --flatten`, GUI (кнопк
 
 ```
 ohlcv (data_hash) ─▶ signals[kind=strategy] (strategy@version, params_hash, bar_ts)
-                 ─▶ fused_signals (fusion_request_id → [→ FUSION SPEC] ml_predictions/llm_calls)
+                 ─▶ fused_signals (idempotency_key; source_breakdown_json → [→ FUSION SPEC] ml_predictions/llm_calls)
                  ─▶ signals[kind=final] (source, risk_flags, expires_ts)
                  ─▶ decision_audit (версии, risk_verdict)
                  ─▶ orders ─▶ fills ─▶ positions
@@ -1776,7 +1777,7 @@ ML- и LLM-этапы реализуются отдельно по `ML_LLM_FUSIO
 1. **Автоторговля реальными деньгами.** Ошибка в sizing или state machine приводит к прямым убыткам. Меры: лестница режимов, micro-cap, CB, kill switch, golden-тесты, ключи без права вывода. Открыто: кто и как утверждает переход в `FULL_AUTO` (один человек или «four eyes»)?
 2. **Агент обошёл skill / ослабил риск-контур.** Skill — это инструкция, а не гарантия. Меры: import-linter, semgrep, CODEOWNERS, golden-тесты, hooks. Остаточный риск: изменение самих тестов агентом — требуется ревью человека для `tests/golden/`.
 3. **Дублирование ML/LLM-логики вне fusion-модуля.** Агент может «удобно» добавить LLM-вызов в news или signals. Меры: запрет импортов, `SentimentScorer` как Protocol, ревью. Открыто: где физически живёт Fusion-реализация — отдельный репозиторий или пакет в монорепо?
-4. **Расхождение контракта `fused_signal` между двумя спецификациями.** Меры: JSON-схемы в одном месте (`docs/contracts/`), версия `contract_version`, contract-тесты по обе стороны. Открыто: владелец схемы.
+4. **Расхождение контракта `fused_signal` между двумя спецификациями.** Меры: схема в одном месте — `ML_LLM_FUSION_SPEC.md` §4.6 (источник истины; ARCH §5.3 только ссылается), версия `api_version`, contract-тесты (`tests/test_fusion_contract.py`). Владелец схемы определён в 0.4.0 — FUSION SPEC §4.6.
 5. **Лицензии и условия API.** NewsAPI бесплатный план — только для разработки; Finnhub/Alpha Vantage — лимиты и запрет перепродажи данных; MetaTrader 5 — условия конкретного брокера; правила бирж на автоматическую торговлю. Нужна проверка перед live.
 6. **Регуляторные ограничения.** Зависят от юрисдикции пользователя и площадки: доступ к Alpaca (US-брокер) и ряду криптобирж ограничен для некоторых стран; налоговый учёт сделок; требования брокера к алготорговле. Спецификация не является юридической консультацией — требуется проверка юристом.
 7. **MetaTrader 5 только под Windows.** Нужен Windows-хост и RPC-мост; отдельная точка отказа и задержки. Открыто: допустим ли такой деплой, или Форекс через другой API (например, REST-брокер)?

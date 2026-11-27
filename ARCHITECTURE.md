@@ -1767,9 +1767,12 @@ description: Use BEFORE creating or changing anything in src/augur/risk or src/a
 | 5 | Risk Gate | R1–R18, sizing, golden-тесты; skill `auto-trade-risk-gate` |
 | 6 | Execution (PAPER) | `OrderManager`, state machine, идемпотентность, Reconciler, CB, kill switch, e2e-тесты |
 | 7 | MICRO_LIVE | `ModeController` с кодами, ручное подтверждение 1-го ордера, micro-cap; прогон на реальном счёте с минимальным депозитом |
-| 8 | FULL_AUTO | promotion-критерии, мониторинг, алерты, runbook инцидентов |
-| 9 | News | фетчеры, дедуп, `RuleBasedScorer`, `news_event`, реакции |
-| 10 | Skills + полировка | установка внешних skills (с пином), hooks, GUI-страницы, MT5-bridge, Alpaca |
+| 8 | News | фетчер Finnhub, нормализация, дедуп, `RuleBasedScorer`, `news_event`, реакции (R16, soft flags); без LLM |
+| 9 | GUI/CLI | полный CLI, GUI мониторинга, цепочка решения по ордеру; GUI-страницы |
+| 10 | ML+LLM | реальная реализация Fusion: ML-модель, LLM-контекст и LLM-скорер новостей (`SentimentScorer` в fusion-модуле), реестр моделей, replay-тест |
+| 11 | FULL_AUTO | promotion-критерии, мониторинг, алерты, runbook инцидентов |
+
+Нумерация этапов совпадает с MINOR-версиями `VERSIONING.md` §4 (этап N = `0.N.0`). Установка внешних skills (с пином), hooks, MT5-bridge и Alpaca-исполнение — по мере необходимости, вне этой нумерации.
 
 GUI и CLI развиваются параллельно с этапа 3 (минимальный Dashboard + CLI `backtest`).
 

@@ -207,9 +207,9 @@ CREATE TABLE artifacts (
 | **0.5.0** | Risk Gate | Лимиты (позиция, дневной убыток, экспозиция), вердикты, таблица `decision_audit` | `db_schema` +1; `config` +1 (лимиты риска) |
 | **0.6.0** | PAPER | Execution в PAPER по ARCHITECTURE.md §14 этап 6: `OrderManager`, state machine, идемпотентность, `Reconciler`, circuit breaker, kill switch, e2e; симулятор исполнения с общей с бэктестом моделью издержек; жёсткая проверка полноты версий перед ордером (§6.2) | `db_schema` +1 (`0005_execution`: fills; orders — с 0001); `config` +1 (исполнение, CB) |
 | **0.7.0** | MICRO_LIVE | Реальное исполнение с микролимитами, `ModeController` с кодами, ручное подтверждение 1-го ордера, kill switch и сверка позиций на реальном брокере | `config` +1 (ключи, микролимиты); `db_schema` по необходимости |
-| **0.8.0** | News | Сбор и нормализация новостей, LLM-оценка новостей | `db_schema` +N (news); первый `prompt_news_v1`; `api_version` 1.1 (поле news_score) |
+| **0.8.0** | News | Сбор и нормализация новостей (Finnhub), дедуп, детерминированный `RuleBasedScorer`, `news_event`, реакции (пауза R16, soft flags). Без LLM: LLM-оценка новостей — в 0.10.0 | `db_schema` +1 (`0006_news`); `config` +1 (новости, реакции); `api_version` без изменений (1.0) |
 | **0.9.0** | GUI/CLI | Полный CLI, GUI мониторинга, просмотр цепочки решения по ордеру | `config` по необходимости |
-| **0.10.0** | ML+LLM | Реальная реализация Fusion: ML-модель + LLM, реестр моделей, replay-тест | `ml_model` с `lightgbm_v1`; новые `<стратегия>@X.Y.Z`, `prompt_*_vN`; `api_version` 1.x или **BREAKING** 2.0 |
+| **0.10.0** | ML+LLM | Реальная реализация Fusion: ML-модель + LLM (включая LLM-оценку новостей как `SentimentScorer` в fusion-модуле), реестр моделей, replay-тест | `ml_model` с `lightgbm_v1`; новые `<стратегия>@X.Y.Z`, `prompt_*_vN`; `api_version` 1.x или **BREAKING** 2.0 |
 | **0.11.0** | FULL_AUTO | Автоторговля без подтверждения человека в рамках лимитов Risk Gate, алертинг | `config` +1 (режим FULL_AUTO); `db_schema` по необходимости |
 | **1.0.0** | Stable | Выполнены все условия §1.3 | `api_version` заморожен на 1.x/2.x; далее строгий SemVer |
 

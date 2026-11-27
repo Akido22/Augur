@@ -20,6 +20,10 @@
 - Решения по расхождениям спецификаций: `ml_model_version` = `lightgbm_v<N>` (VERSIONING §2.3) в
   `ml_models`, `artifacts` и `decision_audit`; ML-код — `augur.fusion.ml` (ARCHITECTURE.md §13);
   объём ML в 0.10.0 — классификатор + правила режима (ML_LLM_FUSION_SPEC.md §2.4).
+- Skill `llm-output-validation` приведён к ML_LLM_FUSION_SPEC.md §3.2, §5, §8.4: выход LLM —
+  `LLMContext` с grounding по `evidence_ids` (вместо `TradeProposal` с BUY/SELL и объёмом), код —
+  `augur.fusion.llm` (вместо `src/augur/llm/`), допускается только повторный запрос с текстом
+  ошибки, без «починки» ответа.
 
 ### Добавлено — 0.9.0
 

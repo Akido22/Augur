@@ -36,6 +36,20 @@ class RiskLimits(BaseModel):
     max_consecutive_losses: int = 4
     micro_live_max_notional: Decimal = Decimal("20")  # в валюте счёта
     volatility_halt_zscore: Decimal = Decimal("4.0")
+    # --- Risk Gate (0.5.0, CONFIG_VERSION 2; ARCHITECTURE.md §2.8, §7.2) ---
+    # FixedFractionalSizer: риск на сделку до стопа, доля equity.
+    risk_per_trade_pct: Decimal = Field(default=Decimal("0.005"), gt=0, le=1)
+    # R15: флаги по `code`, блокирующие вход (BUY/SELL) во всех режимах.
+    blocking_flags: list[str] = Field(default_factory=lambda: ["news_halt"])
+    # R15: дополнительные блокирующие `code` по режиму (ARCH §7.2: fusion_contrarian в MICRO_LIVE).
+    blocking_flags_by_mode: dict[TradingMode, list[str]] = Field(
+        default_factory=lambda: {TradingMode.MICRO_LIVE: ["fusion_contrarian"]}
+    )
+    # Мягкие флаги по `code`: sized_qty × risk_flag_multiplier, вердикт REDUCED.
+    soft_flags: list[str] = Field(default_factory=lambda: ["news_mixed", "high_vol"])
+    risk_flag_multiplier: Decimal = Field(default=Decimal("0.5"), gt=0, lt=1)
+    # REDUCE: доля |позиции|, закрываемая сигналом REDUCE [ДОПУЩЕНИЕ].
+    reduce_fraction: Decimal = Field(default=Decimal("0.5"), gt=0, le=1)
 
 
 class FusionSettings(BaseModel):

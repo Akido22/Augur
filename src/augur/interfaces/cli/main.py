@@ -36,6 +36,13 @@ from augur.execution import (
 )
 from augur.execution.approval import awaiting_approval, first_order_confirmed
 from augur.execution.modes import mode_rank
+from augur.news import (
+    NewsFetcher,
+    NewsReactionRules,
+    NewsRepository,
+    ReactionNotFoundError,
+    build_news_pipeline,
+)
 from augur.strategies import (
     StrategyParamsError,
     UnknownStrategyError,
@@ -57,6 +64,8 @@ orders_app = typer.Typer(
 app.add_typer(orders_app, name="orders")
 mode_app = typer.Typer(help="Режим работы: просмотр и смена (ARCH §1.4).", no_args_is_help=True)
 app.add_typer(mode_app, name="mode")
+news_app = typer.Typer(help="Новости: сбор, лента, реакции (ARCH §8).", no_args_is_help=True)
+app.add_typer(news_app, name="news")
 
 T = TypeVar("T")
 
@@ -673,3 +682,106 @@ def reconcile(db: str = DbOption) -> None:
         typer.echo(f"MISMATCH {m.symbol}: db={m.db_qty} venue={m.venue_qty} tol={m.tolerance}")
     if not report.ok:
         raise typer.Exit(code=1)
+
+
+# --- News (0.8.0, ARCH §8, §9.2) --------------------------------------------------------
+
+
+def _news_fetchers(settings: Settings) -> list[NewsFetcher] | None:
+    """Источники для `news fetch`; None — Finnhub из настроек. Подменяется в тестах."""
+    return None
+
+
+@news_app.command("fetch")
+def news_fetch(db: str = DbOption) -> None:
+    """Один цикл: Finnhub → нормализация → дедуп → rule:v1 → news → реакции."""
+    settings = _require_settings()
+    conn = _open_db(db)
+    try:
+        try:
+            pipeline = build_news_pipeline(conn, settings, fetchers=_news_fetchers(settings))
+        except ValueError as e:
+            typer.echo(f"ERROR: {e}", err=True)
+            raise typer.Exit(code=1) from e
+        result = asyncio.run(pipeline.run_once())
+    finally:
+        conn.close()
+    typer.echo(
+        f"fetched {result.fetched}, inserted {result.inserted}, "
+        f"duplicates {result.duplicates}, dropped {result.dropped}"
+    )
+    for ev in result.events:
+        typer.echo(
+            f"  {ev.importance or '-':<6} {ev.sentiment:+.2f} "
+            f"{','.join(ev.symbols) or '-':<16} {(ev.title or '')[:80]}"
+        )
+    for r in result.reactions:
+        target = r.symbol or r.strategy or "-"
+        until = _fmt_ts(r.expires_ts) if r.expires_ts is not None else "-"
+        typer.echo(f"REACTION {r.rule}: {r.action} {target} until {until}")
+    for source, err in result.errors.items():
+        typer.echo(f"ERROR {source}: {err}", err=True)
+    if result.errors and len(result.errors) == len(pipeline.sources):
+        raise typer.Exit(code=1)  # ни один источник не ответил
+
+
+@news_app.command("list")
+def news_list(
+    symbol: str | None = typer.Option(None, "--symbol", help="Фильтр по символу (BTC/USDT)."),
+    limit: int = typer.Option(20, "--limit", min=1, help="Сколько последних новостей."),
+    db: str = DbOption,
+) -> None:
+    """Последние новости: время публикации, importance, sentiment, символы, заголовок."""
+    conn = _open_db(db)
+    try:
+        rows = NewsRepository(conn).recent(symbol=symbol, limit=limit)
+    finally:
+        conn.close()
+    typer.echo(f"{'published':<23} {'imp':<6} {'sent':>6} {'symbols':<16} title")
+    for n in rows:
+        sent = f"{n.sentiment:+.2f}" if n.sentiment is not None else "-"
+        typer.echo(
+            f"{_fmt_ts(n.published_ts):<23} {n.importance or '-':<6} {sent:>6} "
+            f"{','.join(n.symbols) or '-':<16} {n.title[:80]}"
+        )
+
+
+@news_app.command("reactions")
+def news_reactions(db: str = DbOption) -> None:
+    """Активные реакции: паузы символов/стратегий (R16) и news-флаги (R15, soft)."""
+    conn = _open_db(db)
+    try:
+        rows = NewsReactionRules(conn, []).active(now_ms=_now_ms())
+    finally:
+        conn.close()
+    if not rows:
+        typer.echo("no active news reactions")
+        return
+    for r in rows:
+        target = r.symbol or r.strategy or "-"
+        flag = f" flag={r.flag_code}:{r.flag_severity}" if r.flag_code else ""
+        typer.echo(
+            f"{r.id} {r.rule}: {r.action} {target}{flag} until {_fmt_ts(r.expires_ts)} "
+            f"(news {r.news_id})"
+        )
+
+
+@news_app.command("lift")
+def news_lift(
+    reaction_id: str = typer.Argument(..., help="id реакции из `augur news reactions`."),
+    confirm: bool = typer.Option(False, "--confirm", help="Обязательно: подтверждение снятия."),
+    db: str = DbOption,
+) -> None:
+    """Снять паузу или news-флаг досрочно (с записью NEWS_REACTION_LIFTED в аудит)."""
+    if not confirm:
+        typer.echo("ERROR: --confirm is required", err=True)
+        raise typer.Exit(code=2)
+    conn = _open_db(db)
+    try:
+        rec = NewsReactionRules(conn, []).lift(reaction_id, actor=_actor(), now_ms=_now_ms())
+    except ReactionNotFoundError as e:
+        typer.echo(f"ERROR: no active reaction {reaction_id}", err=True)
+        raise typer.Exit(code=1) from e
+    finally:
+        conn.close()
+    typer.echo(f"lifted {rec.id}: {rec.action} {rec.symbol or rec.strategy or '-'}")

@@ -7,6 +7,63 @@
 
 ## [Unreleased]
 
+**Компоненты (готовится 0.8.0 — News):** db_schema_version 5 → 6 · api_version 1.0 (без изменений) · config_version 4 → 5 · метод скоринга `rule:v1` (без LLM, `llm_prompt_version` не появляется)
+
+Блок 0.8.0 идёт отдельно от 0.7.0: 0.7.0 ещё не выпущен. При релизе 0.7.0 его блок ниже станет
+`[0.7.0]`, а этот останется в `[Unreleased]`.
+
+### Добавлено — 0.8.0
+
+- Новостной контур `augur.news` (ARCHITECTURE.md §8, §14 этап 8): fetch → normalize → dedup
+  (`content_hash` + url) → привязка к символам → `RuleBasedScorer` → `news` → `news_event` →
+  `NewsReactionRules`. Каждая новость — одна транзакция (строка, реакции, аудит).
+- `FinnhubFetcher`: market news по категориям (`NEWS__FINNHUB_CATEGORIES`, по умолчанию
+  `crypto`). Ключ `FINNHUB_API_KEY` передаётся только заголовком `X-Finnhub-Token`, не в URL.
+  Ошибки: 429/5xx/таймаут — retryable, 401/403 — нет. Протокол `NewsFetcher` готов для NewsAPI и
+  Alpha Vantage.
+- Нормализация: NFKC, вырезание управляющих символов, обрезка заголовка (300) и summary
+  (`NEWS__SUMMARY_MAX_CHARS`). Привязка к `settings.symbols`: базовый актив или символ в
+  `related`, либо базовый актив / алиас (`NEWS__SYMBOL_ALIASES`) как целое слово в тексте.
+- `RuleBasedScorer` (`rule:v1`): детерминированный словарь терминов с весами, вес источника
+  (`NEWS__SOURCE_WEIGHTS`); sentiment ∈ [-1, 1], confidence, importance (low/medium/high).
+- `news_event/1.0` (ARCH §8.3) как Pydantic-модель `NewsEvent`; подписчики через
+  `NewsPipeline.subscribe` (вызываются после COMMIT, ошибка подписчика не роняет цикл).
+- `NewsReactionRules` (ARCH §8.4): `pause_symbol`, `pause_strategy`, `add_risk_flag`, `notify`.
+  Условия: `sentiment_lt/gt`, `abs_sentiment_lt`, `confidence_gte`, `importance_in`,
+  `window_count_gte` за `window_min`. Срок реакции — `published_ts + duration_min`. Правила по
+  умолчанию — `strong_negative_pause`, `mixed_reduce_risk` (`news_mixed`), `any_high_alert`.
+  Аудит: `NEWS_REACTION`, `NEWS_REACTION_LIFTED`, `NEWS_FETCH_FAILED`.
+- Миграция `0006_news`: `news` (DDL ARCH §3.2 + `confidence`, `importance`, уникальный url) и
+  `news_reactions` (активные эффекты со сроком, снятие человеком).
+- CLI: `augur news fetch`, `augur news list [--symbol] [--limit]`, `augur news reactions`,
+  `augur news lift <id> --confirm`.
+- Тесты: нормализация, хэш, привязка, скорер, Finnhub на мок-транспорте httpx, пайплайн (дедуп,
+  курсор, ошибки источника), реакции, R15/R16/soft-sizing из БД, миграция, CLI.
+
+### Изменено — 0.8.0
+
+- `RiskContextBuilder` читает активные `news_reactions`: паузы → `news_paused_symbols` /
+  `news_paused_strategies` (R16; пауза по имени стратегии покрывает все версии), флаги символа →
+  новое поле `RiskContext.news_flags`.
+- `RiskGate`: R15 и soft-sizing учитывают `sig.risk_flags` ∪ `ctx.news_flags`. Флаги по-прежнему
+  только ужесточают, CLOSE/REDUCE не блокируются.
+- Конфиг (config_version 5): `NewsSettings` (`NEWS__*`), правила — `NEWS__RULES` (JSON). У всех
+  полей есть дефолты.
+- VERSIONING.md §4 и ARCHITECTURE.md §14: этапы пронумерованы одинаково (8 News, 9 GUI/CLI,
+  10 ML+LLM, 11 FULL_AUTO). LLM-оценка новостей, `prompt_news_v1` и `api_version` 1.1 перенесены
+  в 0.10.0. ARCHITECTURE.md §3.2, §8, §9.2 — по факту реализации.
+
+### Примечания — 0.8.0
+
+- Решения пользователя: без LLM (LLM-скорер — реализация `SentimentScorer` в fusion-модуле,
+  0.10.0); только Finnhub.
+- Не реализовано: `reduce_risk(multiplier)` (уменьшение — через `add_risk_flag` с кодом из
+  `risk.soft_flags`), `macro_event_blackout` (нужен экономический календарь), периодический
+  `poll_news` (нет оркестратора, запуск — `augur news fetch`), уведомления (`notify` пишет только
+  аудит и лог), `config/news_rules.yaml` (правила в `Settings`, без новой зависимости).
+- `[ДОПУЩЕНИЕ]` Словарь `rule:v1` и пороги правил — стартовые; подобрать на истории новостей.
+- Проверено на копии рабочей БД: миграция 3 → 6 проходит.
+
 **Компоненты (готовится 0.7.0 — MICRO_LIVE):** db_schema_version 5 (без изменений) · api_version 1.0 (без изменений) · config_version 3 → 4
 
 ### Добавлено

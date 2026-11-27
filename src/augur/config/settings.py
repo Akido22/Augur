@@ -8,8 +8,9 @@ import hashlib
 import json
 from decimal import Decimal
 from enum import StrEnum
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -97,6 +98,100 @@ class ModeSettings(BaseModel):
     min_micro_trades: int = Field(default=20, ge=1)
 
 
+Importance = Literal["low", "medium", "high"]
+
+
+class NewsFlag(BaseModel):
+    """Флаг, который добавляет реакция `add_risk_flag` (формат `RiskFlag` FUSION SPEC §4.6)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str = Field(min_length=1)
+    severity: Importance
+
+
+class NewsRuleWhen(BaseModel):
+    """Условия правила (ARCHITECTURE.md §8.4). Все заданные условия должны выполняться."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    sentiment_lt: float | None = Field(default=None, ge=-1, le=1)
+    sentiment_gt: float | None = Field(default=None, ge=-1, le=1)
+    abs_sentiment_lt: float | None = Field(default=None, gt=0, le=1)
+    confidence_gte: float | None = Field(default=None, ge=0, le=1)
+    importance_in: list[Importance] | None = None
+    # Не меньше N новостей по символу за window_min (с учётом текущей), отфильтрованных по
+    # importance_in, если оно задано.
+    window_count_gte: int | None = Field(default=None, ge=1)
+    window_min: int = Field(default=60, gt=0)
+
+
+class NewsRule(BaseModel):
+    """Правило `NewsReactionRules`. Действия только ужесточают риск (ARCHITECTURE.md §8.4).
+
+    `reduce_risk(multiplier)` и `macro_event_blackout` (нужен экономический календарь) в 0.8.0
+    не поддерживаются: уменьшение размера — через `add_risk_flag` с кодом из `risk.soft_flags`.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    when: NewsRuleWhen = NewsRuleWhen()
+    action: Literal["pause_symbol", "pause_strategy", "add_risk_flag", "notify"]
+    duration_min: int = Field(default=60, gt=0)
+    flag: NewsFlag | None = None  # только для add_risk_flag
+    strategies: list[str] = Field(default_factory=list)  # только для pause_strategy
+
+    @model_validator(mode="after")
+    def _action_args(self) -> Self:
+        if (self.action == "add_risk_flag") != (self.flag is not None):
+            raise ValueError("flag is required for add_risk_flag and only for it")
+        if (self.action == "pause_strategy") != bool(self.strategies):
+            raise ValueError("strategies are required for pause_strategy and only for it")
+        return self
+
+
+def _default_news_rules() -> list[NewsRule]:
+    """Стартовые правила ARCHITECTURE.md §8.4 (без macro_event_blackout)."""
+    return [
+        NewsRule(
+            name="strong_negative_pause",
+            when=NewsRuleWhen(sentiment_lt=-0.6, confidence_gte=0.6, importance_in=["high"]),
+            action="pause_symbol",
+            duration_min=60,
+        ),
+        NewsRule(
+            name="mixed_reduce_risk",
+            when=NewsRuleWhen(abs_sentiment_lt=0.2, importance_in=["high"], window_count_gte=3),
+            action="add_risk_flag",
+            flag=NewsFlag(code="news_mixed", severity="medium"),
+            duration_min=60,
+        ),
+        NewsRule(name="any_high_alert", when=NewsRuleWhen(importance_in=["high"]), action="notify"),
+    ]
+
+
+class NewsSettings(BaseModel):
+    """Новостной контур (0.8.0, CONFIG_VERSION 5; ARCHITECTURE.md §8). Без LLM."""
+
+    lookback_h: int = Field(default=6, gt=0)  # окно первого fetch и пересечения курсора
+    poll_interval_s: int = Field(default=60, gt=0)  # для оркестратора (poll_news, ARCH §2.12)
+    timeout_s: float = Field(default=10.0, gt=0)
+    finnhub_base_url: str = "https://finnhub.io/api/v1"
+    finnhub_categories: list[str] = Field(default_factory=lambda: ["crypto"])
+    # Алиасы для привязки к символам (дополнительно к базовому активу: BTC/USDT → BTC).
+    symbol_aliases: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "BTC/USDT": ["bitcoin"],
+            "ETH/USDT": ["ethereum", "ether"],
+        }
+    )
+    # Вес источника умножает confidence RuleBasedScorer; нет в словаре — 1.0.
+    source_weights: dict[str, float] = Field(default_factory=lambda: {"finnhub": 1.0})
+    summary_max_chars: int = Field(default=1000, gt=0)
+    rules: list[NewsRule] = Field(default_factory=_default_news_rules)
+
+
 class Settings(BaseSettings):
     """Корневые настройки. Режим по умолчанию — PAPER."""
 
@@ -111,6 +206,7 @@ class Settings(BaseSettings):
     execution: ExecutionSettings = ExecutionSettings()
     cb: CircuitBreakerSettings = CircuitBreakerSettings()
     mode: ModeSettings = ModeSettings()
+    news: NewsSettings = NewsSettings()
     # Секреты — только SecretStr, только из окружения
     ccxt_exchange: str = "binance"
     ccxt_api_key: SecretStr | None = None

@@ -1,5 +1,8 @@
 """Сборка `RiskContext` из SQLite и адаптера (ARCHITECTURE.md §7.2, колонка «Источник данных»).
 
+Новостной контур (0.8.0): активные строки `news_reactions` (не сняты, не истекли на `now`) →
+`news_paused_symbols` / `news_paused_strategies` (R16) и `news_flags` символа (R15, soft).
+
 Gate сам не ходит в БД/сеть; этот модуль — единственное место, где контекст собирается.
 Только чтение. Рыночная часть (`MarketSnapshot`) приходит от адаптера через
 `market_snapshot()`; z-оценка волатильности — `return_zscore()` по закрытым барам.
@@ -16,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 from augur.adapters.base import InstrumentSpec, MarketAdapter, MarketStatus
 from augur.config.settings import TradingMode
 from augur.data.models import Bar
+from augur.fusion.contract import RiskFlag
 from augur.risk.gate import intent_key
 from augur.risk.models import CBState, RiskContext
 from augur.signals.ready import SignalReady
@@ -101,7 +105,8 @@ async def market_snapshot(
 
 
 class RiskContextBuilder:
-    """Читает `mode_state`, `cb_state`, `positions`, `portfolio_snapshots`, `orders`, `signals`.
+    """Читает `mode_state`, `cb_state`, `positions`, `portfolio_snapshots`, `orders`, `signals`,
+    `news_reactions`.
 
     Args:
         conn: соединение с применёнными миграциями (0004+).
@@ -176,6 +181,36 @@ class RiskContextBuilder:
         )
         return frozenset(str(r[0]) for r in rows if r[0])
 
+    def news_effects(
+        self, sig: SignalReady, now: datetime
+    ) -> tuple[frozenset[str], frozenset[str], tuple[RiskFlag, ...]]:
+        """(paused_symbols, paused_strategies ∩ стратегии сигнала, news-флаги символа).
+
+        Пауза стратегии задаётся именем (`sma_cross`) или версией (`sma_cross@1.0.0`); имя
+        покрывает все версии.
+        """
+        now_ms = int(now.timestamp() * 1000)
+        rows = self._conn.execute(
+            "SELECT action, symbol, strategy, flag_code, flag_severity FROM news_reactions "
+            "WHERE lifted_ts IS NULL AND expires_ts > ? ORDER BY created_ts, id",
+            (now_ms,),
+        ).fetchall()
+        symbols: set[str] = set()
+        paused: set[str] = set()
+        flags: list[RiskFlag] = []
+        strategies = self.signal_strategies(sig)
+        for action, symbol, strategy, code, severity in rows:
+            if action == "pause_symbol" and symbol is not None:
+                symbols.add(str(symbol))
+            elif action == "pause_strategy" and strategy is not None:
+                name = str(strategy)
+                paused |= {s for s in strategies if s == name or s.split("@")[0] == name}
+            elif action == "add_risk_flag" and symbol == sig.symbol and code is not None:
+                flag = RiskFlag(code=str(code), severity=str(severity))  # type: ignore[arg-type]
+                if flag not in flags:
+                    flags.append(flag)
+        return frozenset(symbols), frozenset(paused), tuple(flags)
+
     def build(
         self,
         sig: SignalReady,
@@ -187,6 +222,7 @@ class RiskContextBuilder:
     ) -> RiskContext:
         mode = self.current_mode()
         pnl, equity_sod = self.day_pnl(mode)
+        db_symbols, db_strategies, news_flags = self.news_effects(sig, now)
         return RiskContext(
             now=now,
             mode=mode,
@@ -197,7 +233,8 @@ class RiskContextBuilder:
             positions=self.positions(mode),
             unknown_order_symbols=self.unknown_order_symbols(),
             active_intents=self.active_intents(),
-            news_paused_symbols=news_paused_symbols,
-            news_paused_strategies=news_paused_strategies,
+            news_paused_symbols=news_paused_symbols | db_symbols,
+            news_paused_strategies=news_paused_strategies | db_strategies,
+            news_flags=news_flags,
             signal_strategies=self.signal_strategies(sig),
         )

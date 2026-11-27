@@ -6,6 +6,7 @@
 - Вердикт — чистая функция `(SignalReady, RiskContext, RiskLimits)`: без I/O и системных часов
   (время — `ctx.now`). Нет данных → чек не проходит (fail-closed).
 - `risk_flags` (`{code, severity}`) только ужесточают: R15 блокирует вход, soft-флаги режут объём.
+  Флаги — `sig.risk_flags` ∪ `ctx.news_flags` (реакции новостного контура, ARCH §8.4).
 
 Действия, снижающие риск (`CLOSE`, `REDUCE`), не блокируются чеками, защищающими от НОВОГО
 риска [ДОПУЩЕНИЕ, skill auto-trade-risk-gate: «CB останавливает только новые входы»]:
@@ -23,6 +24,7 @@ from decimal import Decimal
 
 from augur.adapters.base import MarketStatus
 from augur.config.settings import RiskLimits, TradingMode
+from augur.fusion.contract import RiskFlag
 from augur.ids import new_ulid
 from augur.risk.models import CheckResult, RiskContext, RiskVerdict, VerdictKind
 from augur.risk.sizing import FixedFractionalSizer, PositionSizer, notional, round_down_to_step
@@ -57,6 +59,11 @@ _OPENING = frozenset({SignalAction.BUY, SignalAction.SELL})
 _REDUCING = frozenset({SignalAction.CLOSE, SignalAction.REDUCE})
 _NA = "not applicable: risk-reducing action"
 _NO_DATA = "no data"
+
+
+def _flags(sig: SignalReady, ctx: RiskContext) -> list[RiskFlag]:
+    """Флаги сигнала и активные news-флаги символа (дубликаты не мешают: работаем по множествам)."""
+    return [*sig.risk_flags, *ctx.news_flags]
 
 
 def order_side(sig: SignalReady, position_qty: Decimal) -> str | None:
@@ -202,7 +209,7 @@ class RiskGate:
         qty = min(qty, ctx.equity * self._limits.max_position_pct_equity / unit)
         if ctx.mode == TradingMode.MICRO_LIVE:
             qty = min(qty, self._limits.micro_live_max_notional / unit)
-        soft = sorted({f.code for f in sig.risk_flags} & set(self._limits.soft_flags))
+        soft = sorted({f.code for f in _flags(sig, ctx)} & set(self._limits.soft_flags))
         if soft:
             qty = qty * self._limits.risk_flag_multiplier
         qty = round_down_to_step(qty, inst.qty_step)
@@ -427,14 +434,15 @@ class RiskGate:
         )
 
     def _r15_flags(self, sig: SignalReady, ctx: RiskContext, reducing: bool) -> CheckResult:
-        codes = sorted({f.code for f in sig.risk_flags})
+        flags = _flags(sig, ctx)
+        codes = sorted({f.code for f in flags})
         if reducing:
             return CheckResult(name="risk_flags", passed=True, value=",".join(codes), reason=_NA)
         blocking = set(self._limits.blocking_flags) | set(
             self._limits.blocking_flags_by_mode.get(ctx.mode, [])
         )
-        hits = sorted({f.code for f in sig.risk_flags if f.code in blocking})
-        high = sorted({f.code for f in sig.risk_flags if f.severity == "high"})
+        hits = sorted({f.code for f in flags if f.code in blocking})
+        high = sorted({f.code for f in flags if f.severity == "high"})
         problems = []
         if hits:
             problems.append(f"blocking flags: {','.join(hits)}")

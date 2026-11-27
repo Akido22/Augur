@@ -53,6 +53,8 @@ augur cb status | cb reset --confirm   # состояние CB; сброс по 
 augur mode show | mode set <MODE> --confirm   # режим; повышение на шаг с кодом, понижение сразу
 augur orders approve <id> --confirm    # подтвердить и отправить первый ордер MICRO_LIVE
 augur reconcile                        # сверка ордеров/позиций с реальной площадкой
+augur news fetch | list [--symbol]      # один цикл сбора новостей (Finnhub); лента
+augur news reactions | lift <id> --confirm   # активные паузы/флаги; снятие с аудитом
 ```
 
 Перед коммитом: `ruff check .` и `pytest` должны проходить.

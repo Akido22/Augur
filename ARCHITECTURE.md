@@ -494,10 +494,16 @@ CREATE TABLE news (
     symbols_json  TEXT    NOT NULL DEFAULT '[]',
     sentiment     REAL,                    -- [-1, 1], NULL до скоринга
     sentiment_method TEXT,                 -- "rule:v1" | "fusion:<ref>" [→ FUSION SPEC]
-    relevance     REAL
+    relevance     REAL,
+    confidence    REAL,                    -- [0, 1] (news_event §8.3)
+    importance    TEXT                     -- low | medium | high (реакции §8.4)
 ) STRICT;
 CREATE UNIQUE INDEX ux_news_hash ON news(content_hash);
+CREATE UNIQUE INDEX ux_news_url ON news(url) WHERE url IS NOT NULL;
 CREATE INDEX ix_news_published ON news(published_ts);
+-- news_reactions — активные эффекты NewsReactionRules (§8.4): pause_symbol / pause_strategy /
+-- add_risk_flag со сроком expires_ts, снятие человеком (lifted_ts, lifted_by). Фактический DDL —
+-- миграция 0006_news (0.8.0).
 
 CREATE TABLE signals (
     id             TEXT    PRIMARY KEY,    -- ULID
@@ -1442,6 +1448,8 @@ rules:
 
 Действия: `pause_symbol`, `pause_strategy`, `add_risk_flag`, `reduce_risk(multiplier)`, `notify`. Каждое применение → `audit_log: NEWS_REACTION`. Реакции могут только **ужесточать** риск.
 
+**Реализация 0.8.0.** Правила задаются в `Settings.news.rules` (`NEWS__RULES`, JSON), а не в `config/news_rules.yaml` — без новой зависимости. Поддержаны `pause_symbol`, `pause_strategy`, `add_risk_flag`, `notify`. `reduce_risk(multiplier)` не реализован: уменьшение размера — через `add_risk_flag` с кодом из `risk.soft_flags`. `macro_event_blackout` ждёт экономического календаря. Эффекты хранятся в `news_reactions` со сроком `published_ts + duration_min` и читаются `RiskContextBuilder`: паузы → R16 (`news_paused_symbols` / `news_paused_strategies`, пауза по имени стратегии покрывает все её версии), флаги символа → `RiskContext.news_flags`, которые учитываются в R15 и soft-sizing вместе с `sig.risk_flags`. Новость без символов вызывает только `notify`. `notify` пока пишет аудит и лог: модуля уведомлений нет. Снятие человеком: `augur news lift <id> --confirm` → `NEWS_REACTION_LIFTED`. Источник в 0.8.0 — только Finnhub (ключ только в заголовке `X-Finnhub-Token`). Скорер — `RuleBasedScorer` (`rule:v1`), LLM-скорер — 0.10.0.
+
 ---
 
 ## 9. GUI и CLI
@@ -1488,7 +1496,7 @@ augur run [--mode-check]                         # запуск оркестра
 augur backtest --strategy sma_cross --symbol BTC/USDT --tf 1h --from 2024-01-01 --to 2025-01-01 [--params params.json]
 augur signals list [--symbol] [--since]
 augur signals explain <signal_id>
-augur news fetch|list [--symbol]
+augur news fetch | list [--symbol] [--limit] | reactions | lift <id> --confirm
 augur config validate                            # проверка .env/конфига для текущего режима
 augur mode show
 augur mode set <MODE> --confirm                  # запрос + ввод одноразового кода

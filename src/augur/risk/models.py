@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from augur.adapters.base import InstrumentSpec, MarketStatus
 from augur.config.settings import TradingMode
+from augur.fusion.contract import RiskFlag
 
 __all__ = ["CBState", "CheckResult", "RiskContext", "RiskVerdict", "VerdictKind"]
 
@@ -89,9 +90,12 @@ class RiskContext(BaseModel):
     positions: dict[str, Decimal] = Field(default_factory=dict)  # symbol → qty (знак = сторона)
     unknown_order_symbols: frozenset[str] = frozenset()  # R5: ордера в UNKNOWN
     active_intents: frozenset[str] = frozenset()  # R17: "<signal_id>|<side>" активных ордеров
-    # --- новостной контур (R16; источник — News 0.8.0, до него пусто) ---
-    news_paused_symbols: frozenset[str] = frozenset()
-    news_paused_strategies: frozenset[str] = frozenset()
+    # --- новостной контур (0.8.0; источник — `news_reactions`, ARCH §8.4) ---
+    news_paused_symbols: frozenset[str] = frozenset()  # R16
+    news_paused_strategies: frozenset[str] = frozenset()  # R16
+    # Активные флаги add_risk_flag по символу сигнала: в R15 и soft-sizing вместе с
+    # `sig.risk_flags` (только ужесточают).
+    news_flags: tuple[RiskFlag, ...] = ()
     signal_strategies: frozenset[str] = frozenset()  # strategy_version родителей сигнала
 
     @field_validator("now")

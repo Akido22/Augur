@@ -902,132 +902,110 @@ Alpaca нативно поддерживает `client_order_id` — этало�
 
 ```json
 {
-  "$id": "fusion_request/1.0",
+  "$id": "fusion_request",
   "type": "object",
-  "required": ["request_id", "contract_version", "symbol", "timeframe", "as_of", "strategy_signals", "market_context"],
+  "required": ["asset", "timeframe", "timestamp", "idempotency_key"],
   "additionalProperties": false,
   "properties": {
-    "request_id":       {"type": "string", "description": "ULID; идемпотентный ключ"},
-    "contract_version": {"const": "fusion_request/1.0"},
-    "symbol":           {"type": "string"},
-    "timeframe":        {"type": "string"},
-    "as_of":            {"type": "string", "format": "date-time", "description": "UTC; ts_open закрытого бара. Fusion НЕ должен использовать данные позже as_of"},
-    "strategy_signals": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["signal_id", "strategy", "action", "strength"],
-        "properties": {
-          "signal_id": {"type": "string"},
-          "strategy":  {"type": "string"},
-          "action":    {"enum": ["BUY", "SELL", "CLOSE", "REDUCE", "HOLD", "NO_SIGNAL"]},
-          "strength":  {"type": "number", "minimum": 0, "maximum": 1}
-        }
-      }
-    },
-    "market_context": {
+    "asset":           {"type": "string", "minLength": 1},
+    "timeframe":       {"type": "string"},
+    "timestamp":       {"type": "integer", "minimum": 0, "description": "close_time закрытого бара, Unix ms UTC. Fusion НЕ должен использовать данные позже timestamp"},
+    "idempotency_key": {"type": "string", "minLength": 1, "description": "sha256(asset | bar_close_ts | strategy_version | params_hash); возвращается в FusedSignal без изменений"},
+    "context": {
       "type": "object",
-      "required": ["bars_ref", "data_hash"],
+      "description": "по умолчанию {}; Signal Engine передаёт сигнал стратегии",
       "properties": {
-        "bars_ref":  {"type": "string", "description": "ссылка на окно баров: venue|symbol|tf|from_ts|to_ts"},
-        "data_hash": {"type": "string"},
-        "last_close": {"type": "number"},
-        "spread_bps": {"type": "number"}
+        "strategy_signal_id": {"type": "string", "description": "ULID StrategySignal"},
+        "strategy_version":   {"type": "string", "pattern": "^[a-z0-9_]+@\\d+\\.\\d+\\.\\d+$", "description": "name@SemVer, напр. sma_cross@1.0.0"},
+        "action":             {"enum": ["BUY", "SELL", "CLOSE", "REDUCE", "HOLD", "NO_SIGNAL"]},
+        "strength":           {"type": "number", "minimum": 0, "maximum": 1},
+        "params_hash":        {"type": "string", "description": "sha256 канонического JSON параметров стратегии"},
+        "data_hash":          {"type": "string", "description": "sha256 окна последних warmup_bars баров"}
       }
-    },
-    "news_events": {
-      "type": "array",
-      "items": {"$ref": "news_event/1.0"},
-      "description": "события из новостного контура за окно lookback (п. 8.3)"
-    },
-    "position": {
-      "type": ["object", "null"],
-      "properties": {"qty": {"type": "string"}, "avg_price": {"type": "string"}}
     }
   }
 }
 ```
 
-`[ДОПУЩЕНИЕ]` Бары передаются ссылкой (`bars_ref` + `data_hash`), Fusion читает их из того же SQLite в read-only режиме или через Data API. Это уменьшает payload и делает вход проверяемым по хешу.
+Python-модель — `augur.fusion.client.FusionRequest` (Pydantic, `extra="forbid"`, frozen). Новости (п. 8.3) и позиция в 0.4.0 не передаются.
 
 ### 5.3. Выход Fusion (`FusedSignal`)
 
 > **Схема fused_signal** определена в ML_LLM_FUSION_SPEC.md §4.6.
 > Этот раздел описывает только потребительские правила: fallback, TTL, поведение при недоступном Fusion.
 
-```json
-{
-  "$id": "fused_signal/1.0",
-  "type": "object",
-  "required": ["request_id", "contract_version", "action", "strength", "source_breakdown", "risk_flags", "ttl_seconds"],
-  "additionalProperties": false,
-  "properties": {
-    "request_id":       {"type": "string", "description": "должен совпадать с FusionRequest.request_id"},
-    "contract_version": {"const": "fused_signal/1.0"},
-    "action":           {"enum": ["BUY", "SELL", "CLOSE", "REDUCE", "HOLD", "NO_SIGNAL"]},
-    "strength":         {"type": "number", "minimum": 0, "maximum": 1},
-    "source_breakdown": {
-      "type": "object",
-      "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1},
-      "description": "вклад источников; сумма значений = 1 ± 1e-6"
-    },
-    "explanation_ref":  {"type": ["string", "null"], "description": "непрозрачная ссылка на объяснение в хранилище Fusion"},
-    "risk_flags":       {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9_]{1,40}$"}, "maxItems": 16},
-    "ttl_seconds":      {"type": "integer", "minimum": 1, "maximum": 86400}
-  }
-}
-```
+Поля, типы и ограничения здесь не дублируются (`api_version`, `signal_id`, `idempotency_key`, `asset`, `timestamp`, `expires_at`, `action`, `strength`, `reason`, `explanation_ref`, `risk_flags`, `source_breakdown`, `fusion_config_version` — см. FUSION SPEC §4.6). Для потребителя существенно:
 
-Пример:
+- `action` — уже `SignalAction` (6 значений, маппинг — п. 2.7); `HOLD` и `NO_SIGNAL` неисполняемы.
+- `expires_at` — абсолютный срок жизни, Unix ms UTC; `expires_at > timestamp`.
+- `risk_flags` — список объектов `{code, severity}`, `severity ∈ {low, medium, high}`; флаги только ужесточают решение (п. 5.6, правило 5).
+- `source_breakdown` — `{ml, tech, llm, rules_fired}`, значения `float | list[str] | dict`; требования к сумме нет.
+- `explanation_ref` — непустая строка-ссылка, НЕ FK: `"fusion_stub"` (0.4.0) / `"decision_audit:<ulid>"` (0.5.0+).
+
+Пример (`StubFusionClient`, 0.4.0):
 
 ```json
 {
-  "request_id": "01JD3X8F7Q2W9ZK4M5N6P7R8S9",
-  "contract_version": "fused_signal/1.0",
-  "action": "BUY",
-  "strength": 0.62,
-  "source_breakdown": {"classic": 0.55, "ml": 0.35, "llm": 0.10},
-  "explanation_ref": "fusion://explanations/01JD3X8G...",
-  "risk_flags": ["news_mixed"],
-  "ttl_seconds": 300
+  "api_version": "1.0",
+  "signal_id": "6a3247d4-f93b-56ad-88b6-d9c319a7d2fb",
+  "idempotency_key": "3eb0ab8afb8741ba1df21036e5cc84b28efddeedefdf00e31f31c1f547af2d6b",
+  "asset": "BTC/USDT",
+  "timestamp": 1795161600000,
+  "expires_at": 1795163400000,
+  "action": "HOLD",
+  "strength": 0.0,
+  "reason": "fusion_stub",
+  "explanation_ref": "fusion_stub",
+  "risk_flags": [],
+  "source_breakdown": {"ml": 0.0, "tech": 1.0, "llm": 0.0, "rules_fired": []},
+  "fusion_config_version": "stub-0.4.0"
 }
 ```
 
 ### 5.4. Python-контракт
 
 ```python
-# src/augur/fusion/contract.py
-FUSION_CONTRACT_VERSION = "fused_signal/1.0"
+# src/augur/fusion/contract.py — поля и семантика: FUSION SPEC §4.6
+class RiskFlag(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    code: str = Field(min_length=1)
+    severity: Literal["low", "medium", "high"]
 
-class FusedSignal(BaseModel, frozen=True):
-    model_config = ConfigDict(extra="forbid")
-    request_id: str
-    contract_version: Literal["fused_signal/1.0"]
+SourceBreakdownValue = float | list[str] | dict[str, Any]
+
+class FusedSignal(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    api_version: str                      # == augur.versions.API_VERSION, иначе ValidationError
+    signal_id: str                        # UUID
+    idempotency_key: str = Field(min_length=1)
+    asset: str = Field(min_length=1)
+    timestamp: int = Field(ge=0)          # Unix ms UTC
+    expires_at: int = Field(ge=0)         # > timestamp (model_validator)
     action: SignalAction
-    strength: float = Field(ge=0, le=1)
-    source_breakdown: dict[str, float]
-    explanation_ref: str | None = None
-    risk_flags: list[Annotated[str, StringConstraints(pattern=r"^[a-z0-9_]{1,40}$")]] = Field(max_length=16)
-    ttl_seconds: int = Field(ge=1, le=86400)
+    strength: float = Field(ge=0.0, le=1.0)
+    reason: str
+    explanation_ref: str                  # непустая строка-ссылка, НЕ FK
+    risk_flags: list[RiskFlag]
+    source_breakdown: dict[str, SourceBreakdownValue]   # {ml, tech, llm, rules_fired}
+    fusion_config_version: str = Field(min_length=1)
 
-    @model_validator(mode="after")
-    def _breakdown_sums_to_one(self) -> "FusedSignal": ...
-
+# src/augur/fusion/client.py
 class FusionClient(Protocol):
-    async def fuse(self, req: FusionRequest) -> FusedSignal:
-        """MUST вернуть результат за settings.fusion.timeout_ms или бросить FusionUnavailable.
-        Идемпотентен по request_id."""
-    async def health(self) -> FusionHealth: ...
+    async def get_fused_signal(self, request: FusionRequest) -> FusedSignal | None:
+        """Идемпотентен по request.idempotency_key. None — сигнала нет (Signal Engine уходит в fallback)."""
 
 class StubFusionClient:
-    """MVP-заглушка: всегда возвращает HOLD, strength=0, source_breakdown={"stub":1.0},
-    risk_flags=["fusion_stub"], ttl_seconds=60. Не содержит ML/LLM."""
+    """0.4.0, без ML/LLM: HOLD, если в context есть strategy_signal_id, иначе NO_SIGNAL;
+    strength=0, reason="fusion_stub", explanation_ref="fusion_stub", risk_flags=[],
+    source_breakdown={"ml": 0.0, "tech": 1.0, "llm": 0.0, "rules_fired": []},
+    fusion_config_version="stub-0.4.0", signal_id=uuid5(STUB_NAMESPACE, idempotency_key),
+    expires_at = timestamp + половина длительности бара."""
 
 class HttpFusionClient:
-    """Клиент к внешнему Fusion-сервису (реализация сервиса — [→ FUSION SPEC])."""
+    """Клиент к внешнему Fusion-сервису (в 0.4.0 не реализован; реализация сервиса — [→ FUSION SPEC])."""
 ```
 
-> `StubFusionClient` возвращает `HOLD`, а не копию классического сигнала, чтобы в MVP итоговое решение явно шло через ветку `classic_fallback` и было видно в аудите. `[ДОПУЩЕНИЕ]`. Альтернатива из ТЗ — «neutral fused_signal» — это именно HOLD.
+> `StubFusionClient` возвращает `HOLD` (или `NO_SIGNAL` без технического сигнала), а не копию классического сигнала, чтобы в MVP итоговое решение явно шло через ветку `classic_fallback` и было видно в аудите. `[ДОПУЩЕНИЕ]`. Альтернатива из ТЗ — «neutral fused_signal» — это именно HOLD.
 
 ### 5.5. Валидация на стороне Signal Engine (структурная)
 
@@ -1035,12 +1013,15 @@ Signal Engine выполняет **только структурную** вал�
 
 | # | Проверка | При провале |
 |---|---|---|
-| V1 | Pydantic-валидация по `fused_signal/1.0` (`extra=forbid`) | invalid |
-| V2 | `request_id` совпадает с отправленным | invalid |
-| V3 | `contract_version` поддерживается | invalid |
-| V4 | `sum(source_breakdown) == 1 ± 1e-6` | invalid |
-| V5 | ответ получен до `timeout_ms` | unavailable |
-| V6 | `action ∈ {BUY, SELL}` при отсутствии хотя бы одного согласного классического сигнала → добавить флаг `fusion_contrarian` (не invalid) `[ДОПУЩЕНИЕ]` | flag |
+| V1 | Pydantic-валидация `FusedSignal` по FUSION SPEC §4.6 (`extra=forbid`) — повторно, даже если клиент вернул готовый объект | invalid |
+| V2 | `api_version == versions.API_VERSION` (валидатор V1) | invalid |
+| V3 | `idempotency_key` совпадает с отправленным в `FusionRequest` | invalid |
+| V4 | `asset` совпадает с отправленным в `FusionRequest` | invalid |
+| V5 | `expires_at > now` | invalid (`expired`) |
+| V6 | ответ получен: клиент не бросил исключение (в т.ч. таймаут) и не вернул `None` | unavailable |
+| V7 | `action ∈ {BUY, SELL}` при отсутствии хотя бы одного согласного классического сигнала → добавить флаг `fusion_contrarian` (не invalid) `[ДОПУЩЕНИЕ]` | flag |
+
+invalid → `FUSION_INVALID` (`WARN`) в `audit_log` с перечнем ошибок; unavailable → `FUSION_FALLBACK` (`WARN`). Невалидный сигнал не исправляется.
 
 ### 5.6. Правила поведения
 
@@ -1050,14 +1031,15 @@ async def resolve_signal(self, strat_signals, ctx) -> SignalReady:
     if not self.settings.fusion.enabled:
         return classic.with_source("classic")
     try:
-        fused = await asyncio.wait_for(self.fusion.fuse(req), timeout=self.settings.fusion.timeout_ms / 1000)
-        errors = self.validate_structural(fused, req)
+        fused = await asyncio.wait_for(self.fusion.get_fused_signal(req), timeout=self.settings.fusion.timeout_ms / 1000)
+        fused, errors = (self.validate_fused(fused, req, now_ms) if fused is not None   # V1–V5
+                         else (None, ["fusion returned no signal"]))                  # V6
     except (FusionUnavailable, asyncio.TimeoutError, ValidationError) as e:
         fused, errors = None, [repr(e)]
     if fused is None or errors:
         await self.repo.save_fused(fused, req, valid=False, errors=errors)   # для streak
-        await self.audit.append(event="FUSION_FALLBACK", severity="WARN", ...)
-        await self.bus.publish(FusionInvalid(request_id=req.request_id, errors=errors))
+        await self.audit.append(event=event, severity="WARN", ...)          # FUSION_INVALID | FUSION_FALLBACK (п. 5.5)
+        await self.bus.publish(FusionInvalid(idempotency_key=req.idempotency_key, errors=errors))
         return classic.with_source("classic_fallback").add_flag("ml_disabled")
     fused_id = await self.repo.save_fused(fused, req, valid=True, errors=[])
     return SignalReady.from_fused(fused, fused_id=fused_id, parents=strat_signals)
@@ -1067,8 +1049,8 @@ async def resolve_signal(self, strat_signals, ctx) -> SignalReady:
 1. Signal Engine **MUST NOT** импортировать ML-библиотеки (`sklearn`, `torch`, `lightgbm`, …) и LLM SDK (`anthropic`, `openai`, …). Проверка — `import-linter` + CI-grep.
 2. Если Fusion недоступен/невалиден → режим **ML-disabled** (только классика) + `WARN` в `audit_log`.
 3. `fused_signal` **MUST** пройти Risk Gate. Ни один путь кода не ведёт из `src/augur/fusion` в `src/augur/execution` (контракт `import-linter`).
-4. `ttl_seconds` из fused_signal определяет `expires_at`; Risk Gate отклоняет просроченные (чек `signal_ttl`).
-5. Fusion не может повышать режим, менять лимиты или отключать чеки — его `risk_flags` могут только **ужесточать** решение (см. 7.2, чек `risk_flags`).
+4. `expires_at` из fused_signal (Unix ms UTC) — срок жизни сигнала; Signal Engine отбрасывает `expires_at <= now` (V5), Risk Gate отклоняет просроченные повторно (чек `signal_ttl`).
+5. Fusion не может повышать режим, менять лимиты или отключать чеки — его `risk_flags` (`{code, severity}`) могут только **ужесточать** решение (см. 7.2, чек `risk_flags`).
 
 ---
 

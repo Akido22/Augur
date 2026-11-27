@@ -417,9 +417,19 @@ fusion:
 ### 4.5 Псевдокод `fuse()`
 
 ```python
-class Action(str, Enum):
+from augur.fusion.contract import RiskFlag as ContractRiskFlag   # {code, severity}, §4.6
+from augur.strategies.base import SignalAction                    # 6 значений, §4.6
+
+class Action(str, Enum):                                          # внутреннее действие fuse()
     ENTER_LONG = "enter_long"; ENTER_SHORT = "enter_short"
     EXIT = "exit"; REDUCE = "reduce"; HOLD = "hold"; NO_SIGNAL = "no_signal"
+
+# Маппинг в контракт (ARCHITECTURE.md §2.7); применяется в tr.out(), наружу уходит только SignalAction
+TO_SIGNAL_ACTION = {
+    Action.ENTER_LONG: SignalAction.BUY, Action.ENTER_SHORT: SignalAction.SELL,
+    Action.EXIT: SignalAction.CLOSE, Action.REDUCE: SignalAction.REDUCE,
+    Action.HOLD: SignalAction.HOLD, Action.NO_SIGNAL: SignalAction.NO_SIGNAL,
+}
 
 def _wavg(parts: list[tuple[float, float | None]]) -> float:
     live = [(w, s) for w, s in parts if s is not None and w > 0]
@@ -431,7 +441,8 @@ def fuse(ml: MLPrediction | None, llm: LLMContextResult | None,
          position: PositionState, breaker: BreakerState,
          now_ms: int, bar_ms: int) -> FusedSignal:
     tr = Trace()                                     # -> source_breakdown
-    flags: list[str] = []
+    risk_flags: list[ContractRiskFlag] = []          # -> FusedSignal.risk_flags
+    rules: list[str] = []                            # -> source_breakdown.rules_fired
 
     # 1. Circuit breaker
     if breaker.is_open:
@@ -456,14 +467,14 @@ def fuse(ml: MLPrediction | None, llm: LLMContextResult | None,
         ctx = None
     llm_score = ctx.context_score * ctx.confidence if ctx else None
     if ctx is None:
-        flags.append("llm_unavailable")
+        rules.append("llm_unavailable")
     tr.add("llm", score=llm_score, weight=cfg.weights.llm,
            call_ids=llm.llm_call_ids if llm else [])
 
     # 4. Направление задаёт ML; tech может только погасить
     base = _wavg([(cfg.weights.ml, ml_score), (cfg.weights.tech, tech_score)])
     if d * base <= 0:
-        return tr.out(Action.HOLD, 0.0, reason="tech_cancels_ml", flags=flags)
+        return tr.out(Action.HOLD, 0.0, reason="tech_cancels_ml", risk_flags=risk_flags, rules=rules)
 
     # 5. LLM только ослабляет (если llm_can_amplify = false)
     strength = abs(base)
@@ -476,17 +487,18 @@ def fuse(ml: MLPrediction | None, llm: LLMContextResult | None,
         # 6. Конфликт ML и LLM -> приоритет риска
         if d * llm_score <= -cfg.conflict.llm_opposite_threshold:
             strength *= cfg.conflict.strength_multiplier
-            flags.append("ml_llm_conflict")
+            rules.append("ml_llm_conflict")
 
         # 7. Veto по risk_flags
         sev = {f.severity for f in ctx.risk_flags}
-        flags += [f"{f.code.value}:{f.severity.value}" for f in ctx.risk_flags]
+        risk_flags += [ContractRiskFlag(code=f.code.value, severity=f.severity.value)
+                       for f in ctx.risk_flags]
         if Severity.HIGH in sev:
             if position.is_open:
                 act = Action(cfg.on_high_flag_with_open_position)   # reduce/hold/exit
                 return tr.out(act, 1.0 if act != Action.HOLD else 0.0,
-                              reason="llm_high_risk_flag", flags=flags)
-            return tr.out(Action.HOLD, 0.0, reason="llm_high_risk_flag", flags=flags)
+                              reason="llm_high_risk_flag", risk_flags=risk_flags, rules=rules)
+            return tr.out(Action.HOLD, 0.0, reason="llm_high_risk_flag", risk_flags=risk_flags, rules=rules)
         if Severity.MEDIUM in sev:
             strength *= cfg.medium_flag_multiplier
     else:
@@ -495,12 +507,12 @@ def fuse(ml: MLPrediction | None, llm: LLMContextResult | None,
 
     # 8. Режим рынка
     if ml.regime_tag in cfg.blocked_entry_regimes and not position.is_open:
-        return tr.out(Action.HOLD, 0.0, reason=f"regime_{ml.regime_tag}", flags=flags)
+        return tr.out(Action.HOLD, 0.0, reason=f"regime_{ml.regime_tag}", risk_flags=risk_flags, rules=rules)
 
     # 10. Порог
     strength = round(min(max(strength, 0.0), 1.0), 4)
     if strength < cfg.entry_threshold:
-        return tr.out(Action.HOLD, strength, reason="below_entry_threshold", flags=flags)
+        return tr.out(Action.HOLD, strength, reason="below_entry_threshold", risk_flags=risk_flags, rules=rules)
 
     # Выбор действия с учётом позиции (без пирамидинга и разворота в один шаг)
     if not position.is_open:
@@ -509,11 +521,11 @@ def fuse(ml: MLPrediction | None, llm: LLMContextResult | None,
         act = Action.HOLD                              # добор — только решением Risk Engine
     else:
         act = Action.EXIT                              # разворот = EXIT, затем новый сигнал
-    return tr.out(act, strength, reason="ok", flags=flags,
+    return tr.out(act, strength, reason="ok", risk_flags=risk_flags, rules=rules,
                   ttl_ms=int(bar_ms * cfg.signal_ttl_fraction_of_bar))
 ```
 
-`tr.out(...)` собирает `FusedSignal`: `signal_id`, `idempotency_key = sha256(asset | bar_close_ts | ml.model_version | cfg.config_version)`, `expires_at = now_ms + ttl_ms`, `source_breakdown` из трассы, список сработавших правил.
+`tr.out(...)` собирает `FusedSignal` (§4.6): `api_version`, `action = TO_SIGNAL_ACTION[act]`, `risk_flags` (объекты `{code, severity}`), `signal_id`, `idempotency_key = sha256(asset | bar_close_ts | ml.model_version | cfg.config_version)`, `expires_at = now_ms + ttl_ms`, `source_breakdown` из трассы (`{ml, tech, llm}`), `rules` → `source_breakdown.rules_fired`.
 
 ### 4.6 Выход: `fused_signal`
 

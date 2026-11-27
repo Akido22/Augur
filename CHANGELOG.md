@@ -7,6 +7,74 @@
 
 ## [Unreleased]
 
+**Компоненты (готовится 0.7.0 — MICRO_LIVE):** db_schema_version 5 (без изменений) · api_version 1.0 (без изменений) · config_version 3 → 4
+
+### Добавлено
+
+- MICRO_LIVE (ARCHITECTURE.md §1.4, §7.1, §14 этап 7): реальное исполнение на CCXT spot с
+  micro-лимитами. Путь к площадке прежний: `RiskGate` → `decision_audit` (COMMIT) → `OrderManager`.
+- `ModeController`: повышение режима строго на один шаг, только с одноразовым 6-значным кодом
+  для MICRO_LIVE / FULL_AUTO (TTL `mode.code_ttl_s`). Условия: цель ≤ `trading_mode` и
+  ≤ `max_allowed_mode`, CB в ARMED. Перед подтверждением условия проверяются повторно.
+  `MODE_CHANGE_REQUESTED` → `MODE_CHANGED` (код в аудит не пишется). Понижение — без кода.
+  `sync_with_config` при старте понижает режим до конфига с записью в аудит. Promotion в FULL_AUTO:
+  `mode.min_micro_trades` исполненных ордеров MICRO_LIVE без срабатывания CB.
+- Ручное подтверждение первого ордера MICRO_LIVE (`augur.execution.approval`). Ордер остаётся
+  PENDING с `ORDER_APPROVAL_REQUIRED`. `augur orders approve <id> --confirm` проверяет код, пишет
+  `ORDER_APPROVED` и `micro_first_order_confirmed=1` и отправляет ордер. Если ждать дольше TTL
+  сигнала, ордер становится REJECTED. Каждый новый вход в режим снова требует подтверждения.
+  Системные выходы (SL/TP/flatten) подтверждения не ждут.
+- `CcxtAdapter`: `place_order` (одна попытка, `clientOrderId`, `amount_to_precision`), `get_order`
+  по `clientOrderId`, идемпотентный `cancel_order`, маппинг статусов и комиссии. Флаги
+  `ccxt_sandbox` (по умолчанию true — testnet) и `ccxt_quote_currency`.
+- `build_live_stack` / `LiveStack`: сборка MICRO_LIVE над реальным адаптером, сверка только
+  `settings.symbols`. Если текущий режим ниже стека, одобренные вердикты не исполняются:
+  `EXECUTION_SKIPPED`.
+- `Reconciler`: не трогает ордера, ждущие подтверждения; отклоняет просроченные. Для live-площадки
+  допуск max(`qty_step`, `min_qty`), фильтр символов. Новый `check_positions()` — проверка без
+  побочных эффектов (preflight `mode set`).
+- CLI: `augur mode show`, `augur mode set <MODE> --confirm` (вход в MICRO_LIVE начинается со
+  сверки позиций субсчёта), `augur orders approve <id> --confirm`, `augur reconcile`.
+  `augur kill-switch` при конфиге MICRO_LIVE отменяет ордера и закрывает позиции на реальной
+  площадке. Если площадка недоступна, KILLED всё равно выставляется, с предупреждением.
+- `docs/RUNBOOK_MICRO_LIVE.md`: прогон на testnet и на реальном счёте, откат.
+- Тесты: `ModeController`, e2e MICRO_LIVE (подтверждение, TTL, micro-cap, повторный вход,
+  kill switch, SL без подтверждения, сверка spot), ордера CCXT на мок-бирже, CLI.
+
+### Изменено
+
+- **Без строки `mode_state` режим не выше PAPER**, даже если `TRADING_MODE=MICRO_LIVE`
+  (`ModeStore.current`, `RiskContextBuilder.current_mode`). Конфиг только разрешает режим,
+  включает его `augur mode set`.
+- `CcxtAdapter.get_account_state`: equity spot-счёта = валюта котировки + базовые активы по
+  последней цене. Раньше купленный актив выпадал из equity, и первая покупка выглядела бы
+  дневным убытком на весь notional (R10 / CB `daily_loss`).
+- `OrderManager`: принимает MICRO_LIVE только с реальным адаптером (не `paper`); PAPER — только с
+  `paper`; FULL_AUTO отклоняется (0.11.0).
+- `TradingPipeline` принимает `conn` первым аргументом.
+- Конфиг (config_version 4): `ModeSettings` (`MODE__CODE_TTL_S`, `MODE__MIN_MICRO_TRADES`),
+  `CCXT_SANDBOX`, `CCXT_QUOTE_CURRENCY`. У всех полей есть дефолты.
+- ARCHITECTURE.md: §3.2 — события `ORDER_APPROVAL_REQUIRED`, `ORDER_APPROVED`,
+  `EXECUTION_SKIPPED`; §4.4 и §7.1 — решения по spot и MICRO_LIVE. CLAUDE.md — новые команды.
+
+### Безопасность
+
+- Реальные деньги включаются только тремя явными шагами: `TRADING_MODE` / `MAX_ALLOWED_MODE`
+  ≥ MICRO_LIVE, `CCXT_SANDBOX=false`, `augur mode set MICRO_LIVE --confirm` с кодом. Первый ордер
+  дополнительно требует `orders approve` с кодом.
+- `place_order` на CCXT никогда не повторяется вслепую (ARCH §4.2).
+
+### Примечания
+
+- Решения пользователя: только CCXT spot (Alpaca/MT5 — этап 10); сверка — выделенный субсчёт
+  без базовых активов, без baseline-таблицы; `orders approve` отправляет ордер сам, потому что
+  оркестратора пока нет.
+- `[ДОПУЩЕНИЕ]` «Сделка» для promotion — FILLED-ордер MICRO_LIVE с момента входа в режим.
+- `ccxt_venue_quirks.py` (ARCH §4.4) не реализован: используется унифицированный
+  `clientOrderId`, проверить на testnet конкретной биржи.
+- Не сделано: прогон на реальном счёте (выполняет человек по runbook) и репетиция отката на
+  копии боевой БД (VERSIONING §1.3, п. 5) — оба нужны до релиза 0.7.0.
+
 ## [0.6.0] - 2026-11-27
 
 **Компоненты:** db_schema_version 4 → 5 · api_version 1.0 (без изменений) · config_version 2 → 3 · артефакты `sma_cross@1.0.0`, `rsi@1.0.0`; `ml_model_version` / `llm_prompt_version` = `n/a` (VERSIONING.md §2.3); системные выходы — `strategy_version` `system:sl` / `system:tp` / `system:flatten`

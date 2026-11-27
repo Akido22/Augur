@@ -88,6 +88,15 @@ class CircuitBreakerSettings(BaseModel):
     reset_code_ttl_s: int = Field(default=120, gt=0)  # одноразовый код для `cb reset`
 
 
+class ModeSettings(BaseModel):
+    """Смена режима и MICRO_LIVE (0.7.0, CONFIG_VERSION 4; ARCHITECTURE.md §1.4, §7.1)."""
+
+    # Одноразовый код для `augur mode set` и `augur orders approve` (6 цифр).
+    code_ttl_s: int = Field(default=120, gt=0)
+    # FULL_AUTO: минимум исполненных сделок в MICRO_LIVE без срабатывания CB [ДОПУЩЕНИЕ ARCH §1.4].
+    min_micro_trades: int = Field(default=20, ge=1)
+
+
 class Settings(BaseSettings):
     """Корневые настройки. Режим по умолчанию — PAPER."""
 
@@ -101,10 +110,14 @@ class Settings(BaseSettings):
     fusion: FusionSettings = FusionSettings()
     execution: ExecutionSettings = ExecutionSettings()
     cb: CircuitBreakerSettings = CircuitBreakerSettings()
+    mode: ModeSettings = ModeSettings()
     # Секреты — только SecretStr, только из окружения
     ccxt_exchange: str = "binance"
     ccxt_api_key: SecretStr | None = None
     ccxt_api_secret: SecretStr | None = None
+    # true — testnet биржи (ccxt set_sandbox_mode). Реальные деньги только при явном false.
+    ccxt_sandbox: bool = True
+    ccxt_quote_currency: str = "USDT"  # валюта equity spot-счёта (ARCH §4.4)
     mt5_login: int | None = None
     mt5_password: SecretStr | None = None
     mt5_server: str | None = None

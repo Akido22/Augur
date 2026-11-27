@@ -144,9 +144,9 @@ async def test_unauditable_decision_blocks_order(db: sqlite3.Connection) -> None
     assert db.execute("SELECT COUNT(*) FROM orders").fetchone() == (0,)
 
 
-def test_only_paper_mode_and_paper_venue(db: sqlite3.Connection) -> None:
+def test_mode_and_venue_must_match(db: sqlite3.Connection) -> None:
     kw: dict[str, Any] = {"app_version": APP, "config_hash": "c", "clock": lambda: 0}
-    with pytest.raises(ExecutionRefusedError, match="only PAPER"):
+    with pytest.raises(ExecutionRefusedError, match="real venue"):
         OrderManager(db, PaperAdapter(), mode=TradingMode.MICRO_LIVE, **kw)
 
     class Live(PaperAdapter):
@@ -156,6 +156,9 @@ def test_only_paper_mode_and_paper_venue(db: sqlite3.Connection) -> None:
 
     with pytest.raises(ExecutionRefusedError, match="paper venue"):
         OrderManager(db, Live(), mode=TradingMode.PAPER, **kw)
+    with pytest.raises(ExecutionRefusedError, match="FULL_AUTO"):
+        OrderManager(db, Live(), mode=TradingMode.FULL_AUTO, **kw)
+    assert OrderManager(db, Live(), mode=TradingMode.MICRO_LIVE, **kw).venue == "binance"
 
 
 # --- сеть: place_order не повторяется вслепую ----------------------------------------

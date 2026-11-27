@@ -50,6 +50,9 @@ augur --version             # версия приложения
 augur backtest              # бэктест стратегии (заглушка до соответствующего этапа)
 augur kill-switch           # аварийная остановка: KILLED, ANALYSIS_ONLY, отмена ордеров, flatten
 augur cb status | cb reset --confirm   # состояние CB; сброс по одноразовому коду → PAPER
+augur mode show | mode set <MODE> --confirm   # режим; повышение на шаг с кодом, понижение сразу
+augur orders approve <id> --confirm    # подтвердить и отправить первый ордер MICRO_LIVE
+augur reconcile                        # сверка ордеров/позиций с реальной площадкой
 ```
 
 Перед коммитом: `ruff check .` и `pytest` должны проходить.

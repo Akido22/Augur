@@ -5,27 +5,37 @@ import getpass
 import math
 import sqlite3
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import typer
 from pydantic import ValidationError
 
 from augur import __version__
+from augur.adapters.base import MarketAdapter
 from augur.adapters.paper import PaperAdapter
 from augur.backtest import Backtester, BacktestResult
 from augur.config.settings import Settings, TradingMode, load_settings
 from augur.data.models import Bar
 from augur.db.migrator import MigrationError, Migrator
 from augur.execution import (
+    ApprovalError,
     CircuitBreaker,
+    ExecutionRefusedError,
     InvalidResetCodeError,
     KillSwitch,
+    LiveStack,
+    ModeChangeError,
+    ModeController,
     ModeStore,
     OrderRepository,
+    build_live_stack,
     build_paper_stack,
 )
+from augur.execution.approval import awaiting_approval, first_order_confirmed
+from augur.execution.modes import mode_rank
 from augur.strategies import (
     StrategyParamsError,
     UnknownStrategyError,
@@ -41,8 +51,14 @@ strategies_app = typer.Typer(help="Стратегии: реестр и пара�
 app.add_typer(strategies_app, name="strategies")
 cb_app = typer.Typer(help="Circuit breaker: состояние и сброс.", no_args_is_help=True)
 app.add_typer(cb_app, name="cb")
-orders_app = typer.Typer(help="Ордера (только чтение).", no_args_is_help=True)
+orders_app = typer.Typer(
+    help="Ордера: список и подтверждение первого ордера MICRO_LIVE.", no_args_is_help=True
+)
 app.add_typer(orders_app, name="orders")
+mode_app = typer.Typer(help="Режим работы: просмотр и смена (ARCH §1.4).", no_args_is_help=True)
+app.add_typer(mode_app, name="mode")
+
+T = TypeVar("T")
 
 # Значение по умолчанию берём из модели Settings без загрузки .env:
 # командам БД не нужны секреты (api_auth_token и пр.).
@@ -318,20 +334,20 @@ def kill_switch(
     conn = _open_db(db)
     try:
         settings = _try_settings()
-        if settings is not None and settings.trading_mode == TradingMode.PAPER:
-            stack = build_paper_stack(conn, settings, app_version=__version__, clock=_now_ms)
-            switch = stack.kill_switch
+        if settings is not None and _live_allowed(settings):
+            report = asyncio.run(_kill_live(conn, settings, flatten=flatten))
         else:
-            reason = "settings not loaded" if settings is None else f"mode {settings.trading_mode}"
-            typer.echo(f"WARNING: {reason}: state/mode only, orders not cancelled", err=True)
-            configured = settings.trading_mode if settings is not None else TradingMode.PAPER
-            switch = KillSwitch(
-                conn,
-                orders=None,
-                modes=ModeStore(conn, configured_mode=configured),
-                clock=_now_ms,
-            )
-        report = asyncio.run(switch.engage(actor=_actor(), flatten=flatten))
+            if settings is not None and settings.trading_mode == TradingMode.PAPER:
+                switch = build_paper_stack(
+                    conn, settings, app_version=__version__, clock=_now_ms
+                ).kill_switch
+            else:
+                reason = (
+                    "settings not loaded" if settings is None else f"mode {settings.trading_mode}"
+                )
+                typer.echo(f"WARNING: {reason}: state/mode only, orders not cancelled", err=True)
+                switch = _state_only_switch(conn, settings)
+            report = asyncio.run(switch.engage(actor=_actor(), flatten=flatten))
     finally:
         conn.close()
     typer.echo(f"KILL SWITCH ENGAGED (was {report.was_state}) -> KILLED, mode ANALYSIS_ONLY")
@@ -339,6 +355,37 @@ def kill_switch(
     if flatten:
         typer.echo(f"flatten orders:   {len(report.flatten_orders)}")
     typer.echo("release: augur cb reset --confirm")
+
+
+def _state_only_switch(conn: sqlite3.Connection, settings: Settings | None) -> KillSwitch:
+    configured = settings.trading_mode if settings is not None else TradingMode.PAPER
+    return KillSwitch(
+        conn, orders=None, modes=ModeStore(conn, configured_mode=configured), clock=_now_ms
+    )
+
+
+async def _kill_live(conn: sqlite3.Connection, settings: Settings, *, flatten: bool) -> Any:
+    """Kill switch на реальной площадке. Нет связи — состояние и режим всё равно KILLED."""
+    try:
+        stack = build_live_stack(
+            conn,
+            settings,
+            app_version=__version__,
+            clock=_now_ms,
+            adapter=_live_adapter(settings),
+        )
+        await stack.venue_adapter.connect()
+    except Exception as e:  # noqa: BLE001 — остановка важнее причины сбоя связи
+        typer.echo(
+            f"WARNING: venue unavailable ({type(e).__name__}): KILLED is set, but orders and "
+            "positions at the venue are NOT touched — cancel/close them manually NOW",
+            err=True,
+        )
+        return await _state_only_switch(conn, settings).engage(actor=_actor(), flatten=flatten)
+    try:
+        return await stack.kill_switch.engage(actor=_actor(), flatten=flatten)
+    finally:
+        await stack.venue_adapter.close()
 
 
 def _breaker(conn: sqlite3.Connection) -> CircuitBreaker:
@@ -398,7 +445,7 @@ def cb_reset(
             raise typer.Exit(code=1) from e
     finally:
         conn.close()
-    typer.echo(f"circuit breaker {st.state}; mode PAPER (escalation: augur mode set, 0.7.0)")
+    typer.echo(f"circuit breaker {st.state}; mode PAPER (escalation: augur mode set)")
 
 
 @orders_app.command("list")
@@ -423,3 +470,206 @@ def orders_list(
             f"{o.symbol:<10} {o.side:<4} {o.qty:>14} {o.filled_qty:>14} "
             f"{o.avg_fill_price if o.avg_fill_price is not None else '-':>14}"
         )
+
+
+# --- MICRO_LIVE: режим, подтверждение первого ордера, сверка (0.7.0) ------------------
+
+
+def _live_adapter(settings: Settings) -> MarketAdapter | None:
+    """Реальный адаптер для live-стека; None — CcxtAdapter из настроек. Подменяется в тестах."""
+    return None
+
+
+def _live_allowed(settings: Settings) -> bool:
+    return mode_rank(settings.trading_mode) >= mode_rank(TradingMode.MICRO_LIVE) and mode_rank(
+        settings.max_allowed_mode
+    ) >= mode_rank(TradingMode.MICRO_LIVE)
+
+
+def _require_settings() -> Settings:
+    try:
+        return load_settings()
+    except ValidationError as e:
+        typer.echo(f"ERROR: settings invalid ({e.error_count()} errors)", err=True)
+        raise typer.Exit(code=1) from e
+
+
+async def _with_live(
+    conn: sqlite3.Connection, settings: Settings, fn: Callable[[LiveStack], Awaitable[T]]
+) -> T:
+    """Собрать live-стек, подключиться к площадке, выполнить `fn`, отключиться."""
+    try:
+        stack = build_live_stack(
+            conn,
+            settings,
+            app_version=__version__,
+            clock=_now_ms,
+            adapter=_live_adapter(settings),
+        )
+    except ExecutionRefusedError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    venue = stack.orders.venue
+    net = "TESTNET" if settings.ccxt_sandbox else "REAL MONEY"
+    typer.echo(f"venue: {venue} ({net})")
+    await stack.venue_adapter.connect()
+    try:
+        return await fn(stack)
+    finally:
+        await stack.venue_adapter.close()
+
+
+ModeArg = typer.Argument(..., help="Целевой режим.")
+OrderIdArg = typer.Argument(..., help="id ордера (augur mode show / orders list).")
+
+
+@mode_app.command("show")
+def mode_show(db: str = DbOption) -> None:
+    """Текущий режим, потолки конфига, CB, подтверждение первого ордера, promotion."""
+    conn = _open_db(db)
+    try:
+        settings = _require_settings()
+        ctl = ModeController(conn, settings=settings, clock=_now_ms)
+        stored = ctl.store.stored()
+        promo = ctl.promotion_status()
+        cb = _breaker(conn).status()
+        confirmed = first_order_confirmed(conn)
+        waiting = [
+            o.id
+            for o in OrderRepository(conn).active(mode=TradingMode.MICRO_LIVE.value)
+            if awaiting_approval(conn, o.id)
+        ]
+    finally:
+        conn.close()
+    typer.echo(f"mode:             {ctl_mode_line(stored, settings)}")
+    typer.echo(f"trading_mode:     {settings.trading_mode.value}")
+    typer.echo(f"max_allowed_mode: {settings.max_allowed_mode.value}")
+    typer.echo(f"circuit breaker:  {cb.state}")
+    typer.echo(f"micro 1st order:  {'confirmed' if confirmed else 'awaits approval'}")
+    typer.echo(f"awaiting orders:  {', '.join(waiting) or '-'}")
+    typer.echo(
+        f"FULL_AUTO promo:  {promo.micro_trades}/{promo.required} trades, "
+        f"cb_tripped_since_entry={promo.cb_tripped_since_entry}"
+    )
+
+
+def ctl_mode_line(stored: TradingMode | None, settings: Settings) -> str:
+    effective = ModeStore.effective(stored, settings.trading_mode)
+    note = "" if stored == effective else f" (stored {stored.value if stored else '-'})"
+    return f"{effective.value}{note}"
+
+
+@mode_app.command("set")
+def mode_set(
+    target: TradingMode = ModeArg,
+    confirm: bool = typer.Option(False, "--confirm", help="Обязательно: подтверждение смены."),
+    reason: str = typer.Option("manual", "--reason", help="Причина (для понижения)."),
+    db: str = DbOption,
+) -> None:
+    """Сменить режим. Повышение — на один шаг, с кодом для MICRO_LIVE/FULL_AUTO; понижение — сразу.
+
+    Вход в MICRO_LIVE: сначала сверка позиций `settings.symbols` с реальной площадкой.
+    """
+    if not confirm:
+        typer.echo("ERROR: --confirm is required", err=True)
+        raise typer.Exit(code=2)
+    settings = _require_settings()
+    conn = _open_db(db)
+    try:
+        ctl = ModeController(conn, settings=settings, clock=_now_ms)
+        current = ctl.current()
+        if target == current:
+            typer.echo(f"mode is already {current.value}")
+            return
+        try:
+            if mode_rank(target) < mode_rank(current):
+                ctl.downgrade(target, actor=_actor(), reason=reason)
+            elif target == TradingMode.MICRO_LIVE:
+                asyncio.run(_with_live(conn, settings, lambda st: _escalate(ctl, target, st)))
+            else:
+                asyncio.run(_escalate(ctl, target, None))
+        except ModeChangeError as e:
+            typer.echo(f"ERROR: {e}", err=True)
+            raise typer.Exit(code=1) from e
+        new = ctl.current()
+    finally:
+        conn.close()
+    typer.echo(f"mode {current.value} -> {new.value}")
+    if new == TradingMode.MICRO_LIVE:
+        typer.echo("first MICRO_LIVE order will wait for: augur orders approve <id> --confirm")
+
+
+async def _escalate(ctl: ModeController, target: TradingMode, stack: LiveStack | None) -> None:
+    ctl.check_escalation(target)
+    if stack is not None:
+        mismatches = await stack.reconciler.check_positions()
+        if mismatches:
+            for m in mismatches:
+                typer.echo(f"  {m.symbol}: db={m.db_qty} venue={m.venue_qty}", err=True)
+            raise ModeChangeError(
+                "positions at the venue differ from the DB: use a dedicated subaccount with no "
+                f"base assets for {', '.join(sorted({m.symbol for m in mismatches}))}"
+            )
+    ticket = await ctl.request_change(target, actor=_actor())
+    code = ticket.code
+    if ticket.code_required:
+        typer.echo(f"{ticket.source.value} -> {ticket.target.value}")
+        typer.echo(f"confirmation code: {ticket.code} (valid until {_fmt_ts(ticket.expires_ts)})")
+        code = typer.prompt("enter the code to confirm").strip()
+    ctl.confirm_change(ticket.ticket_id, code, actor=_actor())
+
+
+@orders_app.command("approve")
+def orders_approve(
+    order_id: str = OrderIdArg,
+    confirm: bool = typer.Option(False, "--confirm", help="Обязательно: подтверждение отправки."),
+    db: str = DbOption,
+) -> None:
+    """Подтвердить первый ордер MICRO_LIVE кодом и отправить его на площадку (ARCH §7.1)."""
+    if not confirm:
+        typer.echo("ERROR: --confirm is required", err=True)
+        raise typer.Exit(code=2)
+    settings = _require_settings()
+    conn = _open_db(db)
+    try:
+
+        async def run(stack: LiveStack) -> Any:
+            ticket = stack.approval.issue_code(order_id)
+            o = stack.orders.orders.get(order_id)
+            assert o is not None  # noqa: S101 — проверено issue_code
+            typer.echo(f"order {o.id}: {o.side} {o.qty} {o.symbol} (coid {o.client_order_id})")
+            typer.echo(
+                f"confirmation code: {ticket.code} (valid until {_fmt_ts(ticket.expires_ts)})"
+            )
+            code = typer.prompt("enter the code to send the order").strip()
+            return await stack.approval.approve(order_id, code, actor=_actor())
+
+        try:
+            rec = asyncio.run(_with_live(conn, settings, run))
+        except ApprovalError as e:
+            typer.echo(f"ERROR: {e}", err=True)
+            raise typer.Exit(code=1) from e
+    finally:
+        conn.close()
+    typer.echo(f"order {rec.id}: {rec.state.value}, filled {rec.filled_qty}")
+
+
+@app.command("reconcile")
+def reconcile(db: str = DbOption) -> None:
+    """Сверить ордера и позиции БД с реальной площадкой (MICRO_LIVE). Расхождение → CB."""
+    settings = _require_settings()
+    if not _live_allowed(settings):
+        typer.echo("ERROR: reconcile needs a config that allows MICRO_LIVE", err=True)
+        raise typer.Exit(code=1)
+    conn = _open_db(db)
+    try:
+        report = asyncio.run(_with_live(conn, settings, lambda st: st.reconciler.run()))
+    finally:
+        conn.close()
+    typer.echo(f"checked orders:    {report.checked_orders}")
+    typer.echo(f"updated orders:    {', '.join(report.updated_orders) or '-'}")
+    typer.echo(f"unresolved orders: {', '.join(report.unresolved_orders) or '-'}")
+    for m in report.mismatches:
+        typer.echo(f"MISMATCH {m.symbol}: db={m.db_qty} venue={m.venue_qty} tol={m.tolerance}")
+    if not report.ok:
+        raise typer.Exit(code=1)

@@ -143,7 +143,7 @@ class AdapterNotConnectedError(AdapterError):
     """Метод вызван до `connect()`."""
 
 
-ORDERS_NOT_SUPPORTED = "отправка ордеров через этот адаптер появится в 0.7.0 (MICRO_LIVE)"
+ORDERS_NOT_SUPPORTED = "ордера через этот адаптер не поддерживаются (0.7.0: только CCXT spot)"
 
 
 @runtime_checkable

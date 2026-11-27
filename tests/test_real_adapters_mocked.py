@@ -97,6 +97,11 @@ class FakeExchange:
         self.ohlcv_calls: list[tuple[str, str, int, int]] = []
         self.fail_first_ohlcv = False
         self.closed = False
+        self.sandbox = False
+        self.markets: dict[str, Any] = {}
+
+    def set_sandbox_mode(self, enabled: bool) -> None:
+        self.sandbox = enabled
 
     async def load_markets(self) -> dict[str, Any]:
         return {}
@@ -400,13 +405,12 @@ async def test_mt5_connect_without_credentials_is_fatal() -> None:
 @pytest.mark.parametrize(
     "adapter",
     [
-        CcxtAdapter(make_settings()),
         AlpacaAdapter(make_settings()),
         Mt5Adapter(make_settings(), mt5_module=FakeMt5()),
     ],
-    ids=["ccxt", "alpaca", "mt5"],
+    ids=["alpaca", "mt5"],
 )
-async def test_real_adapters_are_read_only(adapter: MarketAdapter) -> None:
+async def test_alpaca_mt5_are_read_only(adapter: MarketAdapter) -> None:
     assert isinstance(adapter, MarketAdapter)
     for call in (
         adapter.place_order(ORDER),

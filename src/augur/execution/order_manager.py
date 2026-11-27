@@ -1,4 +1,4 @@
-"""OrderManager (ARCHITECTURE.md §7.3, VERSIONING.md §6.2) — режим PAPER.
+"""OrderManager (ARCHITECTURE.md §7.1, §7.3, VERSIONING.md §6.2) — режимы PAPER и MICRO_LIVE.
 
 Путь ордера: `RiskVerdict(approved)` → проверка закоммиченной записи `decision_audit`
 (полнота версий, §6.2) → `orders` PENDING (идемпотентно по детерминированному
@@ -15,8 +15,10 @@ machine по ответу → fills (дедуп) → позиции → `decisio
 `decision_audit` с `strategy_version='system:<leg>'`, ордер — только `reduce_only`.
 Защитные выходы не блокируются ни CB, ни kill switch (skill auto-trade-risk-gate).
 
-0.6.0 — только PAPER: менеджер отказывается работать в другом режиме или с адаптером,
-отличным от `paper` (MICRO_LIVE — 0.7.0).
+Режимы: PAPER — только с адаптером `paper`; MICRO_LIVE (0.7.0) — только с реальным адаптером
+(не `paper`). Первый ордер после входа в MICRO_LIVE остаётся PENDING и ждёт ручного
+подтверждения (`ORDER_APPROVAL_REQUIRED`, `augur.execution.approval`). FULL_AUTO — 0.11.0,
+менеджер его отклоняет.
 """
 
 import json
@@ -39,6 +41,7 @@ from augur.adapters.base import (
 from augur.adapters.paper import PaperAdapter
 from augur.config.settings import ExecutionSettings, TradingMode
 from augur.db.audit import append_audit
+from augur.execution.approval import APPROVAL_REQUIRED, awaiting_approval, first_order_confirmed
 from augur.execution.idempotency import make_client_order_id
 from augur.execution.positions import PortfolioSnapshot, PortfolioTracker, PositionManager
 from augur.execution.repository import OrderRecord, OrderRepository
@@ -78,8 +81,8 @@ def _j(v: object) -> str | None:
 class OrderManager:
     """Args:
     conn: соединение с миграциями 0005+.
-    adapter: `ResilientAdapter` над `PaperAdapter` (venue `paper`).
-    mode: режим исполнения; в 0.6.0 — только PAPER.
+    adapter: `ResilientAdapter` над `PaperAdapter` (PAPER) или реальным адаптером (MICRO_LIVE).
+    mode: режим исполнения: PAPER или MICRO_LIVE.
     app_version / config_hash: для системных записей `decision_audit` и сигналов.
     settings: `settings.execution`.
     clock: «сейчас», Unix ms UTC.
@@ -98,12 +101,18 @@ class OrderManager:
         clock: Callable[[], int],
         on_fill: FillHook | None = None,
     ) -> None:
-        if mode != TradingMode.PAPER:
+        if mode == TradingMode.PAPER:
+            if adapter.venue != "paper":
+                raise ExecutionRefusedError(
+                    f"PAPER requires the paper venue, got {adapter.venue!r}"
+                )
+        elif mode == TradingMode.MICRO_LIVE:
+            if adapter.venue == "paper":
+                raise ExecutionRefusedError("MICRO_LIVE requires a real venue, got 'paper'")
+        else:
             raise ExecutionRefusedError(
-                f"0.6.0 executes only PAPER, got {mode} (MICRO_LIVE: 0.7.0)"
+                f"execution supports PAPER and MICRO_LIVE, got {mode} (FULL_AUTO: 0.11.0)"
             )
-        if adapter.venue != "paper":
-            raise ExecutionRefusedError(f"PAPER requires the paper venue, got {adapter.venue!r}")
         self._conn = conn
         self._adapter = adapter
         self._mode = mode
@@ -242,6 +251,7 @@ class OrderManager:
         if side is None:
             return None
         coid = make_client_order_id(sig.signal_id, "entry", 0)
+        needs_approval = self._requires_approval()
         order = self._create_pending(
             coid=coid,
             signal_id=sig.signal_id,
@@ -250,12 +260,20 @@ class OrderManager:
             side="BUY" if side == "BUY" else "SELL",
             qty=v.sized_qty,
             decision_id=decision.id,
+            approval_expires_ts=int(sig.expires_at.timestamp() * 1000) if needs_approval else None,
         )
         if order is None:
             dup = self.orders.get_by_coid(self.venue, coid)
             assert dup is not None  # noqa: S101
             return dup
+        if needs_approval:
+            log.warning("MICRO_LIVE first order %s awaits manual approval", order.id)
+            return order  # PENDING до `augur orders approve` (ARCH §7.1)
         return await self.submit(order)
+
+    def _requires_approval(self) -> bool:
+        """MICRO_LIVE: первый ордер после входа в режим ждёт ручного подтверждения."""
+        return self._mode == TradingMode.MICRO_LIVE and not first_order_confirmed(self._conn)
 
     def _suppress_duplicate(self, order: OrderRecord, signal_id: str) -> None:
         """`ORDER_DUPLICATE_SUPPRESSED` (COMMIT). На площадку ничего не уходит."""
@@ -285,8 +303,12 @@ class OrderManager:
         side: Literal["BUY", "SELL"],
         qty: Decimal,
         decision_id: str,
+        approval_expires_ts: int | None = None,
     ) -> OrderRecord | None:
-        """Новый PENDING + ссылка из decision_audit, одна транзакция. Дубль → None."""
+        """Новый PENDING + ссылка из decision_audit, одна транзакция. Дубль → None.
+
+        `approval_expires_ts` задан — в той же транзакции `ORDER_APPROVAL_REQUIRED` (MICRO_LIVE).
+        """
         now = self._clock()
         try:
             order, created = self.orders.insert_pending(
@@ -318,6 +340,22 @@ class OrderManager:
                 },
                 ts=now,
             )
+            if approval_expires_ts is not None:
+                self._audit(
+                    APPROVAL_REQUIRED,
+                    order,
+                    {
+                        "client_order_id": coid,
+                        "signal_id": signal_id,
+                        "symbol": symbol,
+                        "side": side,
+                        "qty": str(qty),
+                        "expires_ts": approval_expires_ts,
+                        "approve": f"augur orders approve {order.id} --confirm",
+                    },
+                    severity="WARN",
+                    ts=now,
+                )
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
@@ -356,6 +394,8 @@ class OrderManager:
         """Отправить PENDING-ордер. Не-PENDING возвращается как есть (уже отправлен)."""
         if order.state != OrderState.PENDING:
             return order
+        if awaiting_approval(self._conn, order.id):
+            return order  # MICRO_LIVE: без ручного подтверждения не отправляется
         req = self._request(order)
         try:
             ack: OrderAck | None = await self._adapter.place_order(req)
@@ -611,6 +651,39 @@ class OrderManager:
             if rec.state in (OrderState.CANCELLED, OrderState.REJECTED):
                 n += 1
         return n
+
+    async def expire_unapproved(self) -> list[str]:
+        """Ордера, ждущие подтверждения дольше TTL сигнала → REJECTED (FUSION SPEC [Д7]).
+
+        Returns:
+            id отклонённых ордеров.
+        """
+        now = self._clock()
+        out = []
+        for order in self.orders.active(mode=self._mode.value):
+            if order.state != OrderState.PENDING or not awaiting_approval(self._conn, order.id):
+                continue
+            row = self._conn.execute(
+                "SELECT expires_ts FROM signals WHERE id = ?", (order.signal_id,)
+            ).fetchone()
+            if row is not None and row[0] is not None and now < int(row[0]):
+                continue
+            rec = await self.apply_ack(
+                order,
+                self.rejected_ack(order, "approval timeout: signal TTL expired"),
+                actor="approval",
+            )
+            self._write_execution_result_commit(rec)
+            out.append(rec.id)
+        return out
+
+    def _write_execution_result_commit(self, order: OrderRecord) -> None:
+        try:
+            self._write_execution_result(order)
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
 
     async def expire_partials(self) -> int:
         """Отменить остаток PARTIAL MARKET-ордеров старше `partial_timeout_s` (ARCH §7.3)."""

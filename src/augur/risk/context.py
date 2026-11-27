@@ -115,8 +115,8 @@ class RiskContextBuilder:
 
     def current_mode(self) -> TradingMode:
         row = self._conn.execute("SELECT mode FROM mode_state WHERE id = 1").fetchone()
-        if row is None:
-            return self._configured
+        if row is None:  # режим не выставлялся: не выше PAPER (повышение — только mode set)
+            return min(self._configured, TradingMode.PAPER, key=MODE_ORDER.index)
         try:
             stored = TradingMode(row[0])
         except ValueError:

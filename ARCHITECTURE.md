@@ -633,7 +633,7 @@ CREATE TABLE cb_state (
 ) STRICT;
 ```
 
-Перечень `audit_log.event` (enum в коде): `MODE_CHANGE_REQUESTED`, `MODE_CHANGED`, `SIGNAL_CREATED`, `FUSION_FALLBACK`, `FUSION_INVALID`, `RISK_APPROVED`, `RISK_REJECTED`, `ORDER_SUBMITTED`, `ORDER_UPDATED`, `ORDER_DUPLICATE_SUPPRESSED`, `CB_TRIPPED`, `CB_RESET`, `KILL_SWITCH`, `RECONCILE_MISMATCH`, `DATA_ANOMALY`, `NEWS_REACTION`, `CONFIG_LOADED`, `ADAPTER_ERROR`.
+Перечень `audit_log.event` (enum в коде): `MODE_CHANGE_REQUESTED`, `MODE_CHANGED`, `SIGNAL_CREATED`, `FUSION_FALLBACK`, `FUSION_INVALID`, `RISK_APPROVED`, `RISK_REJECTED`, `ORDER_SUBMITTED`, `ORDER_UPDATED`, `ORDER_DUPLICATE_SUPPRESSED`, `ORDER_APPROVAL_REQUIRED`, `ORDER_APPROVED`, `EXECUTION_SKIPPED` (0.7.0, MICRO_LIVE), `CB_TRIPPED`, `CB_RESET`, `KILL_SWITCH`, `RECONCILE_MISMATCH`, `DATA_ANOMALY`, `NEWS_REACTION`, `CONFIG_LOADED`, `ADAPTER_ERROR`.
 
 ### 3.3. Интерфейсные таблицы для Fusion
 
@@ -856,7 +856,9 @@ class ResilientAdapter:
 | `get_account_state` | `fetch_balance()` |
 | `get_instrument` | `market(symbol)` → `precision`, `limits` |
 
-Особенности: имя параметра клиентского id различается по биржам (`clientOrderId` в унифицированном API, но часть бирж требует свои ключи) — маппинг в `ccxt_venue_quirks.py`. Округление объёма — `amount_to_precision`, цены — `price_to_precision`. Sandbox-режим (`set_sandbox_mode(True)`) используется в интеграционных тестах.
+Особенности: имя параметра клиентского id различается по биржам (`clientOrderId` в унифицированном API, но часть бирж требует свои ключи) — маппинг в `ccxt_venue_quirks.py` (в 0.7.0 не реализован: используется унифицированный `clientOrderId`; перед live на конкретной бирже проверить на testnet).
+
+Spot в 0.7.0: `place_order` — одна попытка без повторов (§4.2); `get_order` ищет по `clientOrderId` среди последних ордеров символа (`fetch_orders` или `fetch_open_orders` + `fetch_closed_orders`); `cancel_order` находит ордер по `clientOrderId` и отменяет по id биржи. `reduce_only` и присоединённые SL/TP spot не поддерживает: закрывающий объём ограничивает `OrderManager` (|позиция|), SL/TP — `check_protective_exits`. Комиссия в базовой валюте пересчитывается в валюту котировки по средней цене. `equity` = валюта котировки + базовые активы по последней цене (без переоценки покупка выглядела бы дневным убытком на весь notional). Reconciler сверяет только символы из БД и `settings.symbols`, допуск — max(`qty_step`, `min_qty`). Округление объёма — `amount_to_precision`, цены — `price_to_precision`. Sandbox-режим (`set_sandbox_mode(True)`) используется в интеграционных тестах.
 
 ### 4.5. Акции — Alpaca
 
@@ -1165,7 +1167,14 @@ class ModeController:
 | `MICRO_LIVE` | Реальный адаптер; `qty` принудительно = `max(min_qty, notional ≤ micro_live_max_notional)`; **первый ордер после входа в режим** ожидает ручного подтверждения (`augur orders approve <id>` или кнопка GUI, подтверждаемая кодом); остальные — автоматически |
 | `FULL_AUTO` | Реальный адаптер; автоматическое исполнение в пределах `RiskLimits` |
 
-При старте процесса режим восстанавливается из `mode_state`, но **не выше** `settings.trading_mode`; если конфиг ниже сохранённого — понижение с записью в аудит.
+При старте процесса режим восстанавливается из `mode_state`, но **не выше** `settings.trading_mode`; если конфиг ниже сохранённого — понижение с записью в аудит. Если строки `mode_state` нет, режим — из конфига, но **не выше `PAPER`**: конфиг лишь разрешает MICRO_LIVE/FULL_AUTO, включаются они только через `mode set` (0.7.0).
+
+Реализация MICRO_LIVE (0.7.0, решения пользователя):
+- Площадка — только CCXT spot; `ccxt_sandbox=true` (по умолчанию) включает testnet, для реальных денег — явно `false`.
+- Первый ордер после входа в режим остаётся `PENDING` и в той же транзакции пишет `ORDER_APPROVAL_REQUIRED`. `augur orders approve <id> --confirm`: одноразовый код → `ORDER_APPROVED` + `micro_first_order_confirmed=1` → CLI сам собирает live-стек и отправляет ордер. Ожидание не дольше TTL сигнала: просроченный ордер → `REJECTED` (Reconciler / approve). Системные выходы (SL/TP/flatten) подтверждения не ждут.
+- Стек MICRO_LIVE собирается, когда конфиг разрешает режим, но текущий режим не повышает: пока `mode_state` ниже MICRO_LIVE (до `mode set`, после CB/kill switch), одобренный вердикт не исполняется — `EXECUTION_SKIPPED`.
+- Вход в MICRO_LIVE (`mode set MICRO_LIVE`) начинается со сверки позиций `settings.symbols` с площадкой: торговля ведётся на выделенном субсчёте без базовых активов.
+- Promotion в FULL_AUTO: исполненные (`FILLED`) ордера MICRO_LIVE с момента входа в режим и ни одного `CB_TRIPPED`/`KILL_SWITCH` за это время `[ДОПУЩЕНИЕ]`. Исполнение FULL_AUTO — 0.11.0: `OrderManager` его отклоняет.
 
 ### 7.2. Pre-trade risk checks
 

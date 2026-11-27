@@ -1,7 +1,18 @@
-"""CCXT-адаптер криптобирж — только чтение (ARCHITECTURE.md §4.4).
+"""CCXT-адаптер криптобирж, spot (ARCHITECTURE.md §4.4).
 
-Ордера (`place_order`, `cancel_order`, `get_order`) — с 0.7.0.
-Ключи берутся только из `Settings` (`SecretStr`) и нигде не логируются.
+Ордера (0.7.0, MICRO_LIVE):
+- `place_order` — ОДНА попытка без повторов (ARCH §4.2): при таймауте Execution сначала
+  спрашивает `get_order(client_order_id)`. `client_order_id` уходит на биржу как `clientOrderId`.
+- `get_order` ищет ордер по `clientOrderId` среди последних ордеров символа (unified API ccxt);
+  не найден → None.
+- `cancel_order` идемпотентен: находит ордер по `clientOrderId`, отменяет по id биржи и
+  возвращает итоговый статус.
+- Spot: `reduce_only` и присоединённые SL/TP биржей не поддерживаются. Закрывающий объём
+  ограничивает OrderManager (|позиция|), SL/TP — `OrderManager.check_protective_exits`.
+- Комиссия в базовой валюте пересчитывается в валюту котировки по средней цене.
+
+`ccxt_sandbox=true` (по умолчанию) включает testnet биржи. Ключи берутся только из `Settings`
+(`SecretStr`) и нигде не логируются.
 """
 
 import time
@@ -11,7 +22,6 @@ from typing import Any, TypeVar
 
 from augur.adapters._sdk import exc_names, import_sdk
 from augur.adapters.base import (
-    ORDERS_NOT_SUPPORTED,
     AccountState,
     AdapterError,
     AdapterNotConnectedError,
@@ -20,6 +30,7 @@ from augur.adapters.base import (
     MarketStatus,
     OrderAck,
     OrderRequest,
+    OrderState,
     RejectedError,
     RetryableError,
     VenuePosition,
@@ -65,7 +76,7 @@ class CcxtAdapter:
         self,
         settings: Settings,
         *,
-        quote_currency: str = "USDT",
+        quote_currency: str | None = None,
         policy: CallPolicy | None = None,
         exchange_factory: ExchangeFactory | None = None,
         page_limit: int = 1000,
@@ -73,14 +84,15 @@ class CcxtAdapter:
         """
         Args:
             settings: настройки; используются `ccxt_exchange`, `ccxt_api_key`, `ccxt_api_secret`.
-            quote_currency: валюта, в которой считается equity (без конвертации прочих активов).
+            quote_currency: валюта equity (без конвертации прочих активов);
+                None — `settings.ccxt_quote_currency`.
             policy: таймауты и повторы.
             exchange_factory: фабрика объекта биржи (подменяется в тестах).
             page_limit: размер страницы `fetch_ohlcv`.
         """
         self.venue = f"ccxt:{settings.ccxt_exchange}"
         self._settings = settings
-        self._quote = quote_currency
+        self._quote = quote_currency or settings.ccxt_quote_currency
         self._policy = policy or CallPolicy()
         self._factory = exchange_factory
         self._page_limit = page_limit
@@ -100,6 +112,8 @@ class CcxtAdapter:
             if exchange_cls is None:
                 raise FatalAdapterError(f"unknown ccxt exchange: {self._settings.ccxt_exchange}")
             self._ex = exchange_cls(config)
+        if self._settings.ccxt_sandbox:
+            self._ex.set_sandbox_mode(True)
         await self._call(lambda: self._ex.load_markets())
 
     async def close(self) -> None:
@@ -107,7 +121,11 @@ class CcxtAdapter:
             await self._ex.close()
             self._ex = None
 
-    async def _call(self, fn: Callable[[], Awaitable[T]]) -> T:
+    @property
+    def sandbox(self) -> bool:
+        return self._settings.ccxt_sandbox
+
+    async def _call(self, fn: Callable[[], Awaitable[T]], *, retry: bool = True) -> T:
         if self._ex is None:
             raise AdapterNotConnectedError("call connect() first")
 
@@ -119,7 +137,8 @@ class CcxtAdapter:
             except Exception as e:  # noqa: BLE001 — SDK бросает собственные классы
                 raise classify_ccxt_error(e) from e
 
-        return await call_with_retry(wrapped, self._policy)
+        policy = self._policy if retry else self._policy.model_copy(update={"max_retries": 0})
+        return await call_with_retry(wrapped, policy)
 
     async def get_historical(self, symbol: str, timeframe: str, start: int, end: int) -> list[Bar]:
         """`fetch_ohlcv` с пагинацией по `since`."""
@@ -190,10 +209,25 @@ class CcxtAdapter:
         ]
 
     async def get_account_state(self) -> AccountState:
+        """Spot: equity = валюта котировки + базовые активы по последней цене (mark-to-market).
+
+        Без переоценки покупка выглядела бы убытком на весь notional (R10 / CB daily_loss).
+        Активы без рынка `<ccy>/<quote>` в equity не входят.
+        """
         bal: dict[str, Any] = await self._call(lambda: self._ex.fetch_balance())
-        total = Decimal(str((bal.get("total") or {}).get(self._quote) or 0))
+        totals: dict[str, Any] = bal.get("total") or {}
+        total = Decimal(str(totals.get(self._quote) or 0))
         free = Decimal(str((bal.get("free") or {}).get(self._quote) or 0))
         used = Decimal(str((bal.get("used") or {}).get(self._quote) or 0))
+        markets: dict[str, Any] = getattr(self._ex, "markets", None) or {}
+        for ccy, amount in sorted(totals.items()):
+            symbol = f"{ccy}/{self._quote}"
+            if not amount or ccy == self._quote or symbol not in markets:
+                continue
+            t: dict[str, Any] = await self._call(lambda s=symbol: self._ex.fetch_ticker(s))  # type: ignore[misc]
+            price = t.get("last") or t.get("close") or t.get("bid")
+            if price:
+                total += Decimal(str(amount)) * Decimal(str(price))
         return AccountState(
             equity=total,
             cash=free,
@@ -231,11 +265,107 @@ class CcxtAdapter:
         m: dict[str, Any] = self._ex.market(symbol)
         return MarketStatus.OPEN if m.get("active", True) else MarketStatus.HALTED
 
-    async def place_order(self, req: OrderRequest) -> OrderAck:
-        raise NotImplementedError(ORDERS_NOT_SUPPORTED)
+    # --- ордера (0.7.0) ----------------------------------------------------------------
 
-    async def cancel_order(self, client_order_id: str, symbol: str) -> OrderAck:
-        raise NotImplementedError(ORDERS_NOT_SUPPORTED)
+    async def place_order(self, req: OrderRequest) -> OrderAck:
+        """Одна попытка (ARCH §4.2). MARKET и LIMIT; STOP/STOP_LIMIT на spot не поддержаны."""
+        if req.type not in ("MARKET", "LIMIT"):
+            raise RejectedError(f"order type {req.type} not supported on spot")
+        if req.type == "LIMIT" and req.limit_price is None:
+            raise RejectedError("LIMIT order without limit_price")
+        price = float(req.limit_price) if req.type == "LIMIT" and req.limit_price else None
+        params: dict[str, Any] = {"clientOrderId": req.client_order_id}
+        if req.type == "LIMIT":
+            params["timeInForce"] = req.time_in_force
+
+        async def create() -> dict[str, Any]:
+            amount = float(req.qty)
+            if hasattr(self._ex, "amount_to_precision"):  # ARCH §4.4: округление биржей
+                amount = float(self._ex.amount_to_precision(req.symbol, amount))
+            out: dict[str, Any] = await self._ex.create_order(
+                req.symbol, req.type.lower(), req.side.lower(), amount, price, params
+            )
+            return out
+
+        raw = await self._call(create, retry=False)
+        return self._ack(raw, req.client_order_id, req.symbol)
 
     async def get_order(self, client_order_id: str, symbol: str) -> OrderAck | None:
-        raise NotImplementedError(ORDERS_NOT_SUPPORTED)
+        raw = await self._find(client_order_id, symbol)
+        return None if raw is None else self._ack(raw, client_order_id, symbol)
+
+    async def cancel_order(self, client_order_id: str, symbol: str) -> OrderAck:
+        """Отмена по `clientOrderId`. Неизвестный ордер → `RejectedError`."""
+        raw = await self._find(client_order_id, symbol)
+        if raw is None:
+            raise RejectedError(f"order not found: {client_order_id}")
+        ack = self._ack(raw, client_order_id, symbol)
+        if ack.state not in (OrderState.SUBMITTED, OrderState.PARTIAL):
+            return ack  # уже терминальный
+        venue_id = str(raw["id"])
+        await self._call(lambda: self._ex.cancel_order(venue_id, symbol))
+        final = await self._find(client_order_id, symbol)
+        if final is None:
+            return ack.model_copy(update={"state": OrderState.CANCELLED})
+        return self._ack(final, client_order_id, symbol)
+
+    async def _find(self, client_order_id: str, symbol: str) -> dict[str, Any] | None:
+        has: dict[str, Any] = getattr(self._ex, "has", None) or {}
+        if has.get("fetchOrders"):
+            rows: list[dict[str, Any]] = await self._call(
+                lambda: self._ex.fetch_orders(symbol, None, 100)
+            )
+        else:
+            opened: list[dict[str, Any]] = await self._call(
+                lambda: self._ex.fetch_open_orders(symbol)
+            )
+            closed: list[dict[str, Any]] = await self._call(
+                lambda: self._ex.fetch_closed_orders(symbol, None, 100)
+            )
+            rows = [*opened, *closed]
+        for row in rows:
+            if row.get("clientOrderId") == client_order_id:
+                return row
+        return None
+
+    def _ack(self, raw: dict[str, Any], client_order_id: str, symbol: str) -> OrderAck:
+        def dec(x: Any) -> Decimal:
+            return Decimal(str(x)) if x is not None else Decimal(0)
+
+        filled = dec(raw.get("filled"))
+        avg: Decimal | None = None
+        if raw.get("average"):
+            avg = dec(raw["average"])
+        elif filled > 0 and raw.get("cost"):
+            avg = dec(raw["cost"]) / filled
+        status = raw.get("status")
+        state = {
+            "closed": OrderState.FILLED,
+            "canceled": OrderState.CANCELLED,
+            "cancelled": OrderState.CANCELLED,
+            "expired": OrderState.CANCELLED,
+            "rejected": OrderState.REJECTED,
+        }.get(str(status), OrderState.PARTIAL if filled > 0 else OrderState.SUBMITTED)
+        if state == OrderState.FILLED and filled <= 0:
+            state = OrderState.SUBMITTED  # биржа ещё не отдала объём — ждём сверки
+        base = symbol.split("/")[0]
+        fees: list[dict[str, Any]] = list(raw.get("fees") or [])
+        if not fees and raw.get("fee"):
+            fees = [raw["fee"]]
+        fee = Decimal(0)
+        for f in fees:
+            cost = dec(f.get("cost"))
+            if f.get("currency") == base and avg is not None:
+                cost *= avg  # комиссия в базовой валюте → в валюту котировки
+            fee += cost
+        return OrderAck(
+            client_order_id=client_order_id,
+            venue_order_id=None if raw.get("id") is None else str(raw["id"]),
+            state=state,
+            filled_qty=filled,
+            avg_price=avg,
+            fee=fee,
+            fee_ccy=self._quote if fees else None,
+            reject_reason=str(status) if state == OrderState.REJECTED else None,
+            raw={k: raw.get(k) for k in ("id", "status", "filled", "average", "timestamp")},
+        )

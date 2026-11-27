@@ -7,6 +7,66 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-27
+
+**Компоненты:** db_schema_version 3 → 4 · api_version 1.0 (без изменений) · config_version 1 → 2 · артефакты `sma_cross@1.0.0`, `rsi@1.0.0`; `ml_model_version` / `llm_prompt_version` = `n/a` (VERSIONING.md §2.3)
+
+### Добавлено
+
+- Risk Gate (`augur.risk`, ARCHITECTURE.md §2.8, §7.2): `RiskGate.evaluate(sig, ctx)` — чеки
+  R1–R18 в фиксированном порядке, без short-circuit (в вердикте полный список `CheckResult`);
+  чистая функция от `(SignalReady, RiskContext, RiskLimits)`, без I/O и системных часов;
+  отсутствие данных → чек не проходит (fail-closed). Gate только уменьшает объём или отклоняет.
+- Sizing: `PositionSizer` Protocol, `FixedFractionalSizer` (риск `risk_per_trade_pct` до стопа,
+  без стопа — `max_position_pct_equity`); далее cap по позиции, micro-cap в MICRO_LIVE,
+  soft-флаги (× `risk_flag_multiplier`, вердикт `REDUCED`), округление вниз до `qty_step`.
+  CLOSE — вся позиция, REDUCE — `reduce_fraction`.
+- `RiskVerdict.risk_verdict` (APPROVED / REDUCED / REJECTED) и `risk_reason` — расширение схемы
+  ARCH §2.8 для `decision_audit`.
+- `RiskContext` и `RiskContextBuilder`: режим из `mode_state` (не выше `settings.trading_mode`),
+  `cb_state`, позиции текущего режима, дневной PnL из `portfolio_snapshots`, ордера `UNKNOWN`
+  (R5) и активные намерения (R17); `MarketSnapshot` / `market_snapshot(adapter)` — статус рынка,
+  mid-цена, спред (bps), инструмент, счёт; `return_zscore(bars)` для R7.
+- `DecisionAuditWriter` (VERSIONING.md §6.1–6.2): каждый вердикт, включая REJECTED и HOLD/NO_SIGNAL,
+  атомарно пишется в `decision_audit` + `signals.status` + `audit_log` (`RISK_APPROVED` /
+  `RISK_REJECTED` с полным списком чеков). `assert_auditable` / `UnauditableOrderError`:
+  без полного набора версий записи (и ордера) нет. Id записи — ULID из
+  `explanation_ref="decision_audit:<ulid>"`, если он есть.
+- `SignalReady` (ARCH §2.7) — вход Risk Gate: `combine_classic()` (конфликт BUY/SELL → HOLD,
+  большинство, при равенстве — менее рискованное действие, TTL ½ бара), `from_fused()` с V7
+  `fusion_contrarian` (medium), `with_source()`, `add_flag()`.
+- `SignalEngine.resolve_signal()` (ARCH §5.6): classic при `fusion.enabled=false`; иначе Fusion
+  с таймаутом и заранее выданным `decision_audit_id`; сбой / таймаут / невалидный выход →
+  `classic_fallback` + `ml_disabled` (low) + `FUSION_FALLBACK` / `FUSION_INVALID`.
+- `SignalRepository`: `signals` (strategy/final), `fused_signals` (valid=0/1), `set_status`.
+- Миграция `0004_risk_state.sql` (`expand`): `positions`, `portfolio_snapshots` (DDL ARCH §3.2).
+- Golden-тесты Risk Gate: `tests/golden/risk_gate/cases.json` (ожидания посчитаны вручную;
+  изменение — только с ревью человека, ARCH §15 п.2).
+
+### Изменено
+
+- `RiskLimits` (config_version 2): `risk_per_trade_pct`, `blocking_flags`,
+  `blocking_flags_by_mode` (по умолчанию MICRO_LIVE → `fusion_contrarian`), `soft_flags`,
+  `risk_flag_multiplier` (0 < x < 1), `reduce_fraction`. Все поля с дефолтами — `.env` менять
+  не нужно.
+- `StubFusionClient`: `explanation_ref="decision_audit:<ulid>"`, если в `context` передан
+  `decision_audit_id`; иначе по-прежнему `"fusion_stub"`.
+- ARCHITECTURE.md §5.2: в `FusionRequest.context` описан `decision_audit_id`.
+- VERSIONING.md §2.2: константы `DB_SCHEMA_VERSION = 4`, `CONFIG_VERSION = 2`.
+- `DB_SCHEMA_VERSION`: 3 → 4; `CONFIG_VERSION`: 1 → 2.
+
+### Примечания
+
+- Действия, снижающие риск (CLOSE/REDUCE), не блокируются чеками нового риска (R7, R10–R12,
+  R14–R16, R18) и проходят R2 при CB `TRIPPED` (не `KILLED`) — `[ДОПУЩЕНИЕ]`, по skill
+  `auto-trade-risk-gate` («CB останавливает только новые входы»).
+- Skill `auto-trade-risk-gate` в примере показывает short-circuit проверок; реализовано по
+  ARCH §7.2 (все чеки, полный список причин). Семантика kill switch в skill
+  (`--release --mode`) расходится с ARCH §7.4 — решается на этапе 0.6.0.
+- `signals.code_version` пока заполняется версией приложения, а не git sha.
+- CircuitBreaker, KillSwitch, ModeController, Execution — этап 0.6.0; Risk Gate читает их
+  состояние из `cb_state` / `mode_state`.
+
 ## [0.4.0] - 2026-11-23
 
 **Компоненты:** db_schema_version 2 → 3 · api_version 1.0 (контракт применён) · config_version 1 (`CONFIG_VERSION`) · артефакты `sma_cross@1.0.0`, `rsi@1.0.0`

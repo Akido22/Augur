@@ -1,0 +1,96 @@
+{
+  "_doc": "Golden-кейсы Risk Gate (ARCHITECTURE.md §7.2, §14 этап 5). Изменение ожиданий — только с ревью человека (ARCH §15 п.2). База: tests/_risk.py (equity 10000, price 100, qty_step 0.001, min_notional 10, все чеки проходят); лимиты по умолчанию RiskLimits.",
+  "cases": [
+    {
+      "name": "buy_no_stop_paper",
+      "signal": {"action": "BUY"},
+      "ctx": {},
+      "expected": {"approved": true, "risk_verdict": "APPROVED", "failed": [], "sized_qty": "2.000", "sized_notional": "200.000"}
+    },
+    {
+      "name": "buy_with_stop_risk_limited",
+      "_calc": "0.005 * 10000 / (100 - 50) = 1",
+      "signal": {"action": "BUY", "stop_loss": "50"},
+      "ctx": {},
+      "expected": {"approved": true, "risk_verdict": "APPROVED", "failed": [], "sized_qty": "1.000", "sized_notional": "100.000"}
+    },
+    {
+      "name": "buy_tight_stop_capped_by_max_position",
+      "_calc": "0.005 * 10000 / 0.5 = 100 -> cap 0.02 * 10000 / 100 = 2",
+      "signal": {"action": "BUY", "stop_loss": "99.5"},
+      "ctx": {},
+      "expected": {"approved": true, "risk_verdict": "APPROVED", "failed": [], "sized_qty": "2.000", "sized_notional": "200.000"}
+    },
+    {
+      "name": "soft_flag_reduced",
+      "_calc": "2 * 0.5 = 1",
+      "signal": {"action": "SELL", "risk_flags": [{"code": "high_vol", "severity": "medium"}]},
+      "ctx": {},
+      "expected": {"approved": true, "risk_verdict": "REDUCED", "failed": [], "sized_qty": "1.000", "sized_notional": "100.000"}
+    },
+    {
+      "name": "micro_live_capped_to_20",
+      "_calc": "min(2, 20 / 100) = 0.2",
+      "signal": {"action": "BUY"},
+      "ctx": {"mode": "MICRO_LIVE"},
+      "expected": {"approved": true, "risk_verdict": "APPROVED", "failed": [], "sized_qty": "0.200", "sized_notional": "20.000"}
+    },
+    {
+      "name": "micro_live_contrarian_blocked",
+      "signal": {"action": "BUY", "risk_flags": [{"code": "fusion_contrarian", "severity": "medium"}]},
+      "ctx": {"mode": "MICRO_LIVE"},
+      "expected": {"approved": false, "risk_verdict": "REJECTED", "failed": ["risk_flags"], "sized_qty": null, "sized_notional": null}
+    },
+    {
+      "name": "high_severity_blocks_entry",
+      "signal": {"action": "BUY", "risk_flags": [{"code": "exchange_incident", "severity": "high"}]},
+      "ctx": {},
+      "expected": {"approved": false, "risk_verdict": "REJECTED", "failed": ["risk_flags"], "sized_qty": null, "sized_notional": null}
+    },
+    {
+      "name": "spread_example_from_arch_7_2",
+      "signal": {"action": "BUY"},
+      "ctx": {"spread_bps": "41.2"},
+      "expected": {"approved": false, "risk_verdict": "REJECTED", "failed": ["spread"], "sized_qty": null, "sized_notional": null}
+    },
+    {
+      "name": "daily_loss_at_limit",
+      "_calc": "day_pnl -300 <= -0.03 * 10000",
+      "signal": {"action": "BUY"},
+      "ctx": {"day_pnl": "-300"},
+      "expected": {"approved": false, "risk_verdict": "REJECTED", "failed": ["daily_loss"], "sized_qty": null, "sized_notional": null}
+    },
+    {
+      "name": "hold_never_actionable",
+      "signal": {"action": "HOLD"},
+      "ctx": {},
+      "expected": {"approved": false, "risk_verdict": "REJECTED", "failed": ["action_actionable", "concentration", "position_size", "margin_available"], "sized_qty": null, "sized_notional": null}
+    },
+    {
+      "name": "expired_and_cb_tripped_all_reported",
+      "signal": {"action": "BUY", "expires_in_s": 0},
+      "ctx": {"cb_state": "TRIPPED"},
+      "expected": {"approved": false, "risk_verdict": "REJECTED", "failed": ["circuit_breaker_armed", "signal_ttl"], "sized_qty": null, "sized_notional": null}
+    },
+    {
+      "name": "close_short_during_cb_trip_and_daily_loss",
+      "signal": {"action": "CLOSE", "risk_flags": [{"code": "news_halt", "severity": "high"}]},
+      "ctx": {"cb_state": "TRIPPED", "day_pnl": "-900", "positions": {"BTC/USDT": "-1.25"}},
+      "expected": {"approved": true, "risk_verdict": "APPROVED", "failed": [], "sized_qty": "1.250", "sized_notional": "125.000"}
+    },
+    {
+      "name": "reduce_half_rounded_down",
+      "_calc": "0.333 * 0.5 = 0.1665 -> 0.166",
+      "signal": {"action": "REDUCE"},
+      "ctx": {"positions": {"BTC/USDT": "0.333"}},
+      "expected": {"approved": true, "risk_verdict": "APPROVED", "failed": [], "sized_qty": "0.166", "sized_notional": "16.600"}
+    },
+    {
+      "name": "concentration_with_existing_position",
+      "_calc": "(24 * 100 + 200) / 10000 = 0.26 > 0.25",
+      "signal": {"action": "BUY"},
+      "ctx": {"positions": {"BTC/USDT": "24"}},
+      "expected": {"approved": false, "risk_verdict": "REJECTED", "failed": ["concentration"], "sized_qty": null, "sized_notional": null}
+    }
+  ]
+}

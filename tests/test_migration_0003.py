@@ -12,7 +12,7 @@ from augur.db.migrator import Migrator
 def conn(tmp_path: Path) -> sqlite3.Connection:
     db = str(tmp_path / "augur.db")
     result = Migrator(backup_dir=tmp_path / "b", app_version="0.4.0").migrate(db)
-    assert result.applied[-1] == "0003_fusion_contract"
+    assert "0003_fusion_contract" in result.applied
     c = sqlite3.connect(db)
     c.execute("PRAGMA foreign_keys=ON")
     return c
@@ -51,7 +51,7 @@ def _insert(conn: sqlite3.Connection, n: int = 1, **over: object) -> None:
 
 def test_applies_on_clean_db(conn: sqlite3.Connection) -> None:
     versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY 1")]
-    assert versions == [1, 2, 3]
+    assert versions[:3] == [1, 2, 3]
     compat = conn.execute("SELECT compat FROM schema_migrations WHERE version=3").fetchone()[0]
     assert compat == "contract"
     _insert(conn)

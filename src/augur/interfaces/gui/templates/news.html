@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}News{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Активные реакции</h2>
+  <table class="tbl"><thead><tr><th>создана</th><th>id</th><th>правило</th><th>действие</th><th>цель</th><th>флаг</th><th>до</th></tr></thead>
+  <tbody id="reactions"></tbody></table>
+  <p class="muted small">Снять паузу: <code>augur news lift &lt;id&gt; --confirm</code> (с аудитом).</p>
+</div>
+<div class="card">
+  <div class="row"><h2>Лента</h2><input id="news-symbol" placeholder="символ, напр. BTC/USDT"></div>
+  <table class="tbl"><thead><tr><th>опубликовано</th><th>imp</th><th class="num">sent</th><th class="num">conf</th><th>символы</th><th>источник</th><th>заголовок</th></tr></thead>
+  <tbody id="news"></tbody></table>
+</div>
+{% endblock %}
+{% block scripts %}<script>Augur.pages.news();</script>{% endblock %}

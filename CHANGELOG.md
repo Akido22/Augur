@@ -7,10 +7,74 @@
 
 ## [Unreleased]
 
+**Компоненты (готовится 0.9.0 — GUI/CLI):** db_schema_version 6 (без изменений) · api_version 1.0 (без изменений) · config_version 5 (без изменений) · новая зависимость `jinja2>=3.1`
+
+Блоки 0.9.0, 0.8.0 и 0.7.0 идут отдельно: ни один ещё не выпущен.
+
+### Добавлено — 0.9.0
+
+- GUI мониторинга (ARCHITECTURE.md §9.1, §14 этап 9): `augur gui [--host 127.0.0.1] [--port 8000]
+  [--poll 2] [--db]`. Страницы Dashboard (режим, CB, equity в SVG, лента событий), Positions
+  (позиции, ордера с fills), Signals, Decision chain (`/chain/{id}`), News (лента, активные
+  реакции), Control (состояние, kill switch, проверка hash-chain, подсказки CLI). Jinja2 + чистый
+  JS, без CDN и сборки; данные вставляются только через `textContent`.
+- REST `/api/v1` с Bearer-токеном (`API_AUTH_TOKEN`): `status`, `signals`, `signals/{id}/chain`,
+  `orders/{id}/chain`, `orders`, `positions`, `portfolio/snapshots`, `news`, `news/reactions`,
+  `audit`, `audit/verify-chain`; `POST /kill-switch` — единственный пишущий эндпоинт. Чтение — через
+  соединение SQLite `mode=ro`.
+- WebSocket `/ws/events`: токен — первым сообщением (не в URL), неверный — закрытие 4401. Без
+  оркестратора события берутся опросом БД (`EventTail`): `audit_log`, итоговые сигналы, новости,
+  позиции → `signal_ready`, `risk_verdict`, `order_update`, `position_update`, `news_event`,
+  `cb_state`, `mode_changed`, `audit`.
+- Цепочка решения (ARCH §7.5): `ReadService.decision_chain` по id стратегического или итогового
+  сигнала либо ордера — сигналы, fused_signal, decision_audit с версиями, ордера, fills, позиции,
+  события `audit_log`. CLI: `augur signals explain <id> [--json]`, `augur audit explain <id>`.
+- `augur signals list [--symbol] [--since] [--kind] [--limit]`.
+- `augur audit verify-chain`: проверка `prev_hash` / `row_hash` каждой строки `audit_log`; при
+  нарушении — id первой битой строки и код выхода 1.
+- Общие DTO `augur.interfaces.dto` (ARCH §9.3) для REST, GUI и CLI.
+- Тесты: цепочка решения (из final, strategy, ордера), статус и списки, обнаружение подмены
+  `audit_log`, маппинг и хвост событий, CLI, REST (401, чтение без записи, 503 без БД / со старой
+  схемой, kill switch с отпечатком токена, отсутствие опасных команд), XSS в `/chain/{id}`, WS
+  (4401, поток новых событий).
+
+### Изменено — 0.9.0
+
+- Kill switch вынесен в `augur.interfaces.control.engage_kill_switch`: CLI `augur kill-switch` и
+  `POST /api/v1/kill-switch` вызывают один код. Поведение CLI прежнее; предупреждения (площадка
+  недоступна, настройки не загружены) теперь возвращаются в результате.
+- Формула hash-chain вынесена в `augur.db.audit.compute_row_hash` (запись и проверка — одна
+  функция).
+- ARCHITECTURE.md §9.1–§9.3 — по факту реализации; CLAUDE.md — новые команды.
+
+### Исправлено — 0.9.0
+
+- `augur --help` падал с `UnicodeEncodeError` в консоли cp1251: символ «→» в help-тексте
+  `reconcile` и `news fetch`. Заменён на «->».
+
+### Безопасность — 0.9.0
+
+- API по умолчанию слушает `127.0.0.1`; при другом `--host` — предупреждение (наружу только через
+  TLS-прокси, ARCH §9.1). Токен сравнивается за постоянное время, не попадает в URL, логи и аудит
+  (`actor = api:<8 hex sha256>`).
+- Из GUI/REST нельзя снять kill switch, подтвердить ордер, повысить режим или снять паузу
+  новостей — только CLI с кодом / `--confirm`.
+
+### Примечания — 0.9.0
+
+- Решения пользователя: GUI — только чтение + kill switch; Jinja2 + чистый JS; `/ws/events`
+  опросом БД без оркестратора; из CLI ARCH §9.2 в этап вошли `signals` и `audit`.
+- Не реализовано: `augur run` и Orchestrator (§2.12), `config validate`, `auto-trade
+  enable|disable`, `orders cancel`, `audit replay`, `data backfill`, `--remote`; страницы
+  Strategies, Backtest, Models / LLM Audit; `/backtests`, `/mode/requests`,
+  `/orders/{id}/approve`, `/fusion/health`, событие `backtest_progress`.
+- `[ДОПУЩЕНИЕ]` `position_update` ловится по росту `positions.updated_ts`: два обновления с
+  одинаковым ts между опросами дадут одно событие (GUI всё равно перечитывает позиции).
+
 **Компоненты (готовится 0.8.0 — News):** db_schema_version 5 → 6 · api_version 1.0 (без изменений) · config_version 4 → 5 · метод скоринга `rule:v1` (без LLM, `llm_prompt_version` не появляется)
 
 Блок 0.8.0 идёт отдельно от 0.7.0: 0.7.0 ещё не выпущен. При релизе 0.7.0 его блок ниже станет
-`[0.7.0]`, а этот останется в `[Unreleased]`.
+`[0.7.0]`, а блоки 0.8.0 и 0.9.0 останутся в `[Unreleased]`.
 
 ### Добавлено — 0.8.0
 

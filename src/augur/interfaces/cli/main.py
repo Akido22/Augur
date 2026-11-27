@@ -2,6 +2,7 @@
 
 import asyncio
 import getpass
+import json
 import math
 import sqlite3
 import time
@@ -25,17 +26,18 @@ from augur.execution import (
     CircuitBreaker,
     ExecutionRefusedError,
     InvalidResetCodeError,
-    KillSwitch,
     LiveStack,
     ModeChangeError,
     ModeController,
     ModeStore,
     OrderRepository,
     build_live_stack,
-    build_paper_stack,
 )
 from augur.execution.approval import awaiting_approval, first_order_confirmed
 from augur.execution.modes import mode_rank
+from augur.interfaces.control import engage_kill_switch, live_allowed
+from augur.interfaces.dto import DecisionChainDTO
+from augur.interfaces.queries import ChainNotFoundError, ReadService, verify_audit_chain
 from augur.news import (
     NewsFetcher,
     NewsReactionRules,
@@ -343,58 +345,21 @@ def kill_switch(
     conn = _open_db(db)
     try:
         settings = _try_settings()
-        if settings is not None and _live_allowed(settings):
-            report = asyncio.run(_kill_live(conn, settings, flatten=flatten))
-        else:
-            if settings is not None and settings.trading_mode == TradingMode.PAPER:
-                switch = build_paper_stack(
-                    conn, settings, app_version=__version__, clock=_now_ms
-                ).kill_switch
-            else:
-                reason = (
-                    "settings not loaded" if settings is None else f"mode {settings.trading_mode}"
-                )
-                typer.echo(f"WARNING: {reason}: state/mode only, orders not cancelled", err=True)
-                switch = _state_only_switch(conn, settings)
-            report = asyncio.run(switch.engage(actor=_actor(), flatten=flatten))
+        adapter = _live_adapter(settings) if settings is not None else None
+        res = asyncio.run(
+            engage_kill_switch(
+                conn, settings, actor=_actor(), flatten=flatten, clock=_now_ms, live_adapter=adapter
+            )
+        )
     finally:
         conn.close()
-    typer.echo(f"KILL SWITCH ENGAGED (was {report.was_state}) -> KILLED, mode ANALYSIS_ONLY")
-    typer.echo(f"cancelled orders: {report.cancelled}")
+    for w in res.warnings:
+        typer.echo(f"WARNING: {w}", err=True)
+    typer.echo(f"KILL SWITCH ENGAGED (was {res.was_state}) -> KILLED, mode ANALYSIS_ONLY")
+    typer.echo(f"cancelled orders: {res.cancelled}")
     if flatten:
-        typer.echo(f"flatten orders:   {len(report.flatten_orders)}")
+        typer.echo(f"flatten orders:   {res.flatten_orders}")
     typer.echo("release: augur cb reset --confirm")
-
-
-def _state_only_switch(conn: sqlite3.Connection, settings: Settings | None) -> KillSwitch:
-    configured = settings.trading_mode if settings is not None else TradingMode.PAPER
-    return KillSwitch(
-        conn, orders=None, modes=ModeStore(conn, configured_mode=configured), clock=_now_ms
-    )
-
-
-async def _kill_live(conn: sqlite3.Connection, settings: Settings, *, flatten: bool) -> Any:
-    """Kill switch на реальной площадке. Нет связи — состояние и режим всё равно KILLED."""
-    try:
-        stack = build_live_stack(
-            conn,
-            settings,
-            app_version=__version__,
-            clock=_now_ms,
-            adapter=_live_adapter(settings),
-        )
-        await stack.venue_adapter.connect()
-    except Exception as e:  # noqa: BLE001 — остановка важнее причины сбоя связи
-        typer.echo(
-            f"WARNING: venue unavailable ({type(e).__name__}): KILLED is set, but orders and "
-            "positions at the venue are NOT touched — cancel/close them manually NOW",
-            err=True,
-        )
-        return await _state_only_switch(conn, settings).engage(actor=_actor(), flatten=flatten)
-    try:
-        return await stack.kill_switch.engage(actor=_actor(), flatten=flatten)
-    finally:
-        await stack.venue_adapter.close()
 
 
 def _breaker(conn: sqlite3.Connection) -> CircuitBreaker:
@@ -490,9 +455,7 @@ def _live_adapter(settings: Settings) -> MarketAdapter | None:
 
 
 def _live_allowed(settings: Settings) -> bool:
-    return mode_rank(settings.trading_mode) >= mode_rank(TradingMode.MICRO_LIVE) and mode_rank(
-        settings.max_allowed_mode
-    ) >= mode_rank(TradingMode.MICRO_LIVE)
+    return live_allowed(settings)
 
 
 def _require_settings() -> Settings:
@@ -665,7 +628,7 @@ def orders_approve(
 
 @app.command("reconcile")
 def reconcile(db: str = DbOption) -> None:
-    """Сверить ордера и позиции БД с реальной площадкой (MICRO_LIVE). Расхождение → CB."""
+    """Сверить ордера и позиции БД с реальной площадкой (MICRO_LIVE). Расхождение -> CB."""
     settings = _require_settings()
     if not _live_allowed(settings):
         typer.echo("ERROR: reconcile needs a config that allows MICRO_LIVE", err=True)
@@ -694,7 +657,7 @@ def _news_fetchers(settings: Settings) -> list[NewsFetcher] | None:
 
 @news_app.command("fetch")
 def news_fetch(db: str = DbOption) -> None:
-    """Один цикл: Finnhub → нормализация → дедуп → rule:v1 → news → реакции."""
+    """Один цикл: Finnhub -> нормализация -> дедуп -> rule:v1 -> news -> реакции."""
     settings = _require_settings()
     conn = _open_db(db)
     try:
@@ -785,3 +748,186 @@ def news_lift(
     finally:
         conn.close()
     typer.echo(f"lifted {rec.id}: {rec.action} {rec.symbol or rec.strategy or '-'}")
+
+
+# --- Сигналы и аудит: decision chain, hash-chain (0.9.0, ARCH §7.5, §9.2) ----------------
+
+signals_app = typer.Typer(help="Сигналы: лента и цепочка решения.", no_args_is_help=True)
+app.add_typer(signals_app, name="signals")
+audit_app = typer.Typer(help="Аудит: цепочка решения, проверка hash-chain.", no_args_is_help=True)
+app.add_typer(audit_app, name="audit")
+
+
+def _parse_since(value: str | None) -> int | None:
+    """ISO-дата/время (`2026-11-27`, `2026-11-27T10:00`) → Unix ms; без зоны — UTC."""
+    if value is None:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError as e:
+        typer.echo(f"ERROR: --since: expected ISO date/time, got {value!r}", err=True)
+        raise typer.Exit(code=2) from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return int(dt.timestamp() * 1000)
+
+
+@signals_app.command("list")
+def signals_list(
+    symbol: str | None = typer.Option(None, "--symbol", help="Фильтр по символу (BTC/USDT)."),
+    since: str | None = typer.Option(None, "--since", help="Не раньше (ISO, UTC)."),
+    kind: str | None = typer.Option(None, "--kind", help="strategy | final."),
+    limit: int = typer.Option(20, "--limit", min=1, help="Сколько последних сигналов."),
+    db: str = DbOption,
+) -> None:
+    """Последние сигналы: время, вид, источник, действие, сила, статус."""
+    since_ms = _parse_since(since)
+    if kind is not None and kind not in ("strategy", "final"):
+        typer.echo("ERROR: --kind must be 'strategy' or 'final'", err=True)
+        raise typer.Exit(code=2)
+    conn = _open_db(db)
+    try:
+        rows = ReadService(conn).signals(symbol=symbol, since=since_ms, kind=kind, limit=limit)
+    finally:
+        conn.close()
+    typer.echo(
+        f"{'created':<23} {'id':<26} {'kind':<8} {'source':<16} {'symbol':<10} {'action':<9} "
+        f"{'str':>5} {'status':<12} strategy"
+    )
+    for s in rows:
+        typer.echo(
+            f"{_fmt_ts(s.created_ts):<23} {s.id:<26} {s.kind:<8} {s.source:<16} {s.symbol:<10} "
+            f"{s.action:<9} {s.strength:>5.2f} {s.status:<12} {s.strategy or '-'}"
+        )
+
+
+def _print_chain(chain: DecisionChainDTO) -> None:
+    s = chain.signal
+    typer.echo(f"signal {s.id} [{s.kind}] {s.symbol} {s.action} strength={s.strength:.2f}")
+    typer.echo(f"  source={s.source} status={s.status} created={_fmt_ts(s.created_ts)}")
+    typer.echo(f"  expires={_fmt_ts(s.expires_ts)} config_hash={s.config_hash[:12]}…")
+    typer.echo(f"  code_version={s.code_version} risk_flags={s.risk_flags or '-'}")
+    for st in chain.strategy_signals:
+        typer.echo(
+            f"  <- strategy {st.strategy or '-'} {st.action} {st.strength:.2f} "
+            f"bar={_fmt_ts(st.bar_ts)} data_hash={(st.data_hash or '-')[:12]} id={st.id}"
+        )
+    f = chain.fused_signal
+    if f is None:
+        typer.echo("fused_signal: - (fusion not used)")
+    else:
+        typer.echo(
+            f"fused_signal {f.id} {f.action} {f.strength:.2f} valid={f.valid} "
+            f"api={f.api_version} cfg={f.fusion_config_version}"
+        )
+        typer.echo(f"  reason: {f.reason}")
+    if not chain.decisions:
+        typer.echo("decision_audit: - (no risk decision)")
+    for d in chain.decisions:
+        typer.echo(
+            f"decision {d.id} {d.risk_verdict} mode={d.mode} reason={d.risk_reason or '-'} "
+            f"at {_fmt_ts(d.created_at)}"
+        )
+        typer.echo(
+            f"  versions: app={d.app_version} strategy={d.strategy_version} "
+            f"ml={d.ml_model_version} prompt={d.llm_prompt_version}"
+        )
+        if d.execution_result is not None:
+            typer.echo(f"  execution_result: {json.dumps(d.execution_result, ensure_ascii=False)}")
+    for o in chain.orders:
+        typer.echo(
+            f"order {o.id} {o.state} {o.side} {o.qty} {o.symbol} @ {o.avg_fill_price or '-'} "
+            f"filled={o.filled_qty} fee={o.fee} mode={o.mode} coid={o.client_order_id}"
+        )
+        if o.reject_reason:
+            typer.echo(f"  reject_reason: {o.reject_reason}")
+        for fl in o.fills:
+            typer.echo(f"  fill {fl.qty} @ {fl.price} fee={fl.fee} at {_fmt_ts(fl.ts)}")
+    for p in chain.positions:
+        typer.echo(f"position {p.venue}/{p.symbol}/{p.mode} qty={p.qty} avg={p.avg_price}")
+    if chain.events:
+        typer.echo("events:")
+    for e in chain.events:
+        typer.echo(f"  {_fmt_ts(e.ts)} #{e.id} {e.event:<28} {e.severity:<8} {e.actor}")
+
+
+def _explain(ref_id: str, db: str, as_json: bool) -> None:
+    conn = _open_db(db)
+    try:
+        chain = ReadService(conn).decision_chain(ref_id)
+    except ChainNotFoundError as e:
+        typer.echo(f"ERROR: no signal or order with id {ref_id}", err=True)
+        raise typer.Exit(code=1) from e
+    finally:
+        conn.close()
+    if as_json:
+        typer.echo(chain.model_dump_json(indent=2))
+    else:
+        _print_chain(chain)
+
+
+RefIdArg = typer.Argument(..., help="id сигнала (strategy/final) или ордера.")
+JsonOption = typer.Option(False, "--json", help="Вывести DecisionChainDTO в JSON.")
+
+
+@signals_app.command("explain")
+def signals_explain(ref_id: str = RefIdArg, as_json: bool = JsonOption, db: str = DbOption) -> None:
+    """Цепочка решения: сигналы -> fused -> decision_audit -> ордера -> fills -> события."""
+    _explain(ref_id, db, as_json)
+
+
+@audit_app.command("explain")
+def audit_explain(ref_id: str = RefIdArg, as_json: bool = JsonOption, db: str = DbOption) -> None:
+    """То же, что `signals explain` (ARCH §7.5): цепочка решения по сигналу или ордеру."""
+    _explain(ref_id, db, as_json)
+
+
+@audit_app.command("verify-chain")
+def audit_verify_chain(db: str = DbOption) -> None:
+    """Проверка hash-chain `audit_log`: prev_hash и row_hash каждой строки."""
+    conn = _open_db(db)
+    try:
+        rep = verify_audit_chain(conn)
+    finally:
+        conn.close()
+    if rep.ok:
+        typer.echo(f"audit_log hash-chain OK ({rep.rows_checked} rows)")
+        return
+    typer.echo(
+        f"ERROR: audit_log hash-chain BROKEN at id {rep.first_bad_id}: {rep.problem} "
+        f"(checked {rep.rows_checked} rows)",
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+# --- GUI мониторинга и REST (0.9.0, ARCH §9.1) -------------------------------------------
+
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+@app.command("gui")
+def gui(
+    host: str = typer.Option(
+        "127.0.0.1", "--host", help="Адрес. Наружу — только через TLS-прокси."
+    ),
+    port: int = typer.Option(8000, "--port", min=1, max=65535),
+    poll: float = typer.Option(2.0, "--poll", min=0.2, help="Период опроса БД для /ws/events, с."),
+    db: str | None = typer.Option(None, "--db", help="Путь к SQLite (по умолчанию DB_PATH)."),
+) -> None:
+    """GUI мониторинга + REST `/api/v1` + WebSocket `/ws/events` (только чтение и kill switch)."""
+    import uvicorn
+
+    from augur.interfaces.api import create_app
+
+    settings = _require_settings()
+    db_path = db or settings.db_path
+    _open_db(db_path).close()  # схема актуальна — иначе понятная ошибка до старта сервера
+    if host not in LOOPBACK_HOSTS:
+        typer.echo(
+            f"WARNING: listening on {host}: expose only behind a TLS reverse proxy (ARCH §9.1)",
+            err=True,
+        )
+    api = create_app(settings, db_path=db_path, ws_poll_s=poll, live_adapter=_live_adapter)
+    typer.echo(f"Augur GUI: http://{host}:{port}/  (token: API_AUTH_TOKEN)")
+    uvicorn.run(api, host=host, port=port, log_level="info")

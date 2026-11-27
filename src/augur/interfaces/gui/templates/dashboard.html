@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<div class="grid">
+  <div class="card stat"><div class="label">Режим</div><div id="s-mode" class="value">—</div><div id="s-mode-sub" class="muted small"></div></div>
+  <div class="card stat"><div class="label">Circuit breaker</div><div id="s-cb" class="value">—</div><div id="s-cb-sub" class="muted small"></div></div>
+  <div class="card stat"><div class="label">Equity</div><div id="s-equity" class="value">—</div><div id="s-equity-sub" class="muted small"></div></div>
+  <div class="card stat"><div class="label">Ордера / позиции</div><div id="s-orders" class="value">—</div><div id="s-orders-sub" class="muted small"></div></div>
+</div>
+<div class="card">
+  <div class="row"><h2>Equity</h2><select id="eq-mode"><option value="">все режимы</option><option>PAPER</option><option>MICRO_LIVE</option><option>FULL_AUTO</option></select></div>
+  <div id="equity-chart" class="chart"></div>
+</div>
+<div class="card">
+  <h2>События <span class="muted small">(audit_log, обновляется по WebSocket)</span></h2>
+  <table class="tbl"><thead><tr><th>время</th><th>#</th><th>событие</th><th>severity</th><th>actor</th><th>ref</th></tr></thead>
+  <tbody id="events"></tbody></table>
+</div>
+{% endblock %}
+{% block scripts %}<script>Augur.pages.dashboard();</script>{% endblock %}

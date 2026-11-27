@@ -11,6 +11,15 @@ import time
 from typing import Any
 
 
+def compute_row_hash(prev_hash: str | None, row: dict[str, Any]) -> str:
+    """`sha256(prev_hash + canonical_json(row))`; `row` — поля строки без id и хэшей.
+
+    Единая формула для записи (`append_audit`) и проверки (`augur audit verify-chain`).
+    """
+    canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(((prev_hash or "") + canonical).encode("utf-8")).hexdigest()
+
+
 def append_audit(
     conn: sqlite3.Connection,
     *,
@@ -42,8 +51,7 @@ def append_audit(
         "ref_id": ref_id,
         "payload_json": payload_json,
     }
-    canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    row_hash = hashlib.sha256(((prev_hash or "") + canonical).encode("utf-8")).hexdigest()
+    row_hash = compute_row_hash(prev_hash, row)
     conn.execute(
         "INSERT INTO audit_log(ts, actor, event, severity, ref_type, ref_id, payload_json, "
         "prev_hash, row_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",

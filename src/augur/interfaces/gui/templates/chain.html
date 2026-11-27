@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Decision chain{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Цепочка решения <code id="chain-ref" data-ref="{{ ref_id }}">{{ ref_id }}</code></h2>
+  <p class="muted small">ohlcv → strategy signals → fused_signal → final signal → decision_audit → orders → fills → positions (ARCH §7.5)</p>
+  <div id="chain"></div>
+</div>
+{% endblock %}
+{% block scripts %}<script>Augur.pages.chain();</script>{% endblock %}

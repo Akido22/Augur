@@ -55,6 +55,9 @@ augur orders approve <id> --confirm    # подтвердить и отправ�
 augur reconcile                        # сверка ордеров/позиций с реальной площадкой
 augur news fetch | list [--symbol]      # один цикл сбора новостей (Finnhub); лента
 augur news reactions | lift <id> --confirm   # активные паузы/флаги; снятие с аудитом
+augur signals list | explain <id> [--json]   # лента сигналов; цепочка решения (сигнал или ордер)
+augur audit explain <id> | verify-chain      # цепочка решения; проверка hash-chain audit_log
+augur gui [--host 127.0.0.1] [--port 8000]   # GUI мониторинга + REST /api/v1 + /ws/events (Bearer)
 ```
 
 Перед коммитом: `ruff check .` и `pytest` должны проходить.

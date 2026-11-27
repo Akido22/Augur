@@ -1456,7 +1456,9 @@ rules:
 
 ### 9.1. Веб-GUI (FastAPI + WebSocket)
 
-Фронтенд `[ДОПУЩЕНИЕ]`: серверный рендер Jinja2 + HTMX + lightweight-charts — минимум JS-сборки, удобно для агентной генерации. Альтернатива — отдельный SPA (вне скоупа MVP).
+Фронтенд (решение 0.9.0): Jinja2-шаблоны + чистый JS (`fetch` + WebSocket), equity — inline SVG. Без HTMX, библиотек графиков, CDN и сборки; внешних ресурсов страница не грузит. HTML данных не содержит: JS берёт их из REST с токеном, который пользователь вводит на странице (хранится в `sessionStorage` вкладки). Данные вставляются только через `textContent`. Запуск — `augur gui [--host 127.0.0.1] [--port 8000] [--poll 2]`.
+
+**Статус 0.9.0.** GUI — только мониторинг и kill switch. Реализованы страницы Dashboard, Positions, Signals (+ страница цепочки решения `/chain/{id}`), News, Control. Действия из таблицы ниже, кроме kill switch, остаются в CLI с кодом / `--confirm`: approve первого ордера, смена режима, снятие паузы новостей, отмена ордера, закрытие позиции. Страницы Strategies, Backtest и Models / LLM Audit не реализованы.
 
 | Страница | Содержимое | Действия |
 |---|---|---|
@@ -1483,7 +1485,11 @@ REST (префикс `/api/v1`, Bearer-токен):
 | POST | `/kill-switch` | kill switch |
 | GET | `/fusion/health` | статус FusionClient |
 
+**Реализовано в 0.9.0:** `GET /status`, `/signals?symbol=&since=&kind=&limit=`, `/signals/{id}/chain` (id сигнала strategy/final или ордера), `/orders/{id}/chain`, `/orders?state=&symbol=`, `/positions`, `/portfolio/snapshots?mode=&since=`, `/news?symbol=`, `/news/reactions`, `/audit?limit=`, `/audit/verify-chain`; `POST /kill-switch` (тело `{"flatten": bool}`) — единственный пишущий эндпоинт. Чтение идёт через соединение SQLite `mode=ro`. В аудите автор kill switch — `api:<первые 8 hex sha256(токена)>`, сам токен не пишется. Не реализованы: `/backtests`, `/mode/requests`, `/orders/{id}/approve`, `/fusion/health` (у `FusionClient` нет health-протокола; `fusion_enabled` — в `/status`). Swagger/ReDoc выключены (тянут JS с CDN), схема — `/api/v1/openapi.json`.
+
 WebSocket `/ws/events`: сообщения `{"type": "signal_ready" | "risk_verdict" | "order_update" | "position_update" | "news_event" | "cb_state" | "mode_changed" | "backtest_progress", "data": {...}}`.
+
+Реализация 0.9.0: оркестратора и шины событий нет (§2.12), поэтому сервер опрашивает БД раз в `--poll` секунд (`EventTail`): новые строки `audit_log` (тип по префиксу события: `ORDER_`/`EXECUTION_`/`RECONCILE_` → `order_update`, `RISK_` → `risk_verdict`, `CB_`/`KILL_SWITCH` → `cb_state`, `MODE_` → `mode_changed`, `NEWS_` → `news_event`, прочее → `audit`), итоговые сигналы → `signal_ready`, новые новости → `news_event`, изменённые позиции → `position_update`. История при подключении не пересылается. Токен передаётся первым сообщением `{"type": "auth", "token": "..."}`, не в URL; неверный токен — закрытие с кодом 4401. `backtest_progress` не реализован.
 
 API по умолчанию слушает `127.0.0.1`. Доступ извне — только через reverse proxy с TLS `[ДОПУЩЕНИЕ]`.
 
@@ -1492,10 +1498,11 @@ API по умолчанию слушает `127.0.0.1`. Доступ извне 
 Имя команды — `augur`, точка входа — `augur.interfaces.cli.main:app` (`[project.scripts]` в `pyproject.toml`).
 
 ```
-augur run [--mode-check]                         # запуск оркестратора
+augur run [--mode-check]                         # запуск оркестратора (не реализован)
+augur gui [--host] [--port] [--poll] [--db]      # GUI мониторинга + REST + /ws/events (0.9.0)
 augur backtest --strategy sma_cross --symbol BTC/USDT --tf 1h --from 2024-01-01 --to 2025-01-01 [--params params.json]
-augur signals list [--symbol] [--since]
-augur signals explain <signal_id>
+augur signals list [--symbol] [--since] [--kind] [--limit]
+augur signals explain <signal_id|order_id> [--json]
 augur news fetch | list [--symbol] [--limit] | reactions | lift <id> --confirm
 augur config validate                            # проверка .env/конфига для текущего режима
 augur mode show
@@ -1505,7 +1512,7 @@ augur auto-trade disable                         # downgrade до SIGNAL_ONLY
 augur orders list|cancel <id>|approve <id>
 augur kill-switch [--flatten/--no-flatten]
 augur cb status|reset --confirm
-augur audit explain|replay <signal_id> | verify-chain
+augur audit explain <signal_id|order_id> [--json] | replay <signal_id> | verify-chain
 augur db migrate|backup
 augur data backfill --symbol --tf --days
 ```
@@ -1513,6 +1520,8 @@ augur data backfill --symbol --tf --days
 ### 9.3. Общие DTO
 
 Пакет `src/augur/interfaces/dto.py` — единственный источник моделей для GUI и CLI: `StatusDTO`, `SignalDTO`, `DecisionChainDTO`, `OrderDTO`, `PositionDTO`, `PortfolioSnapshotDTO`, `BacktestRequestDTO`, `BacktestResultDTO`, `NewsDTO`, `ModeChangeRequestDTO`, `KillSwitchRequestDTO`. CLI использует сервисный слой напрямую (in-process) либо HTTP-клиент к запущенному процессу (`--remote`) — с теми же DTO.
+
+Статус 0.9.0 по CLI: реализованы `signals list|explain`, `audit explain|verify-chain`, `gui`. Не реализованы: `run`, `config validate`, `auto-trade enable|disable`, `orders cancel`, `audit replay`, `data backfill`, флаг `--remote`. Сервисный слой: `interfaces/queries.py` (`ReadService` — только SELECT, `verify_audit_chain`) и `interfaces/control.py` (`engage_kill_switch` — общий для CLI и REST). DTO `BacktestRequestDTO`, `BacktestResultDTO`, `ModeChangeRequestDTO` не созданы (нет соответствующих эндпоинтов); добавлены `FusedSignalDTO`, `DecisionAuditDTO`, `FillDTO`, `AuditEventDTO`, `NewsReactionDTO`, `AuditChainReportDTO`, `KillSwitchResultDTO`, `EventDTO`.
 
 ---
 

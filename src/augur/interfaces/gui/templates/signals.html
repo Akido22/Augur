@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Signals{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="row"><h2>Сигналы</h2>
+    <select id="sig-kind"><option value="final">итоговые</option><option value="strategy">стратегические</option><option value="">все</option></select>
+    <input id="sig-symbol" placeholder="символ, напр. BTC/USDT">
+    <form id="chain-form" class="inline"><input id="chain-id" placeholder="id сигнала или ордера"><button type="submit">Цепочка</button></form>
+  </div>
+  <table class="tbl"><thead><tr><th>создан</th><th>id</th><th>kind</th><th>source</th><th>symbol</th><th>action</th><th class="num">strength</th><th>status</th><th>strategy</th></tr></thead>
+  <tbody id="signals"></tbody></table>
+</div>
+{% endblock %}
+{% block scripts %}<script>Augur.pages.signals();</script>{% endblock %}

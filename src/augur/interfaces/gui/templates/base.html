@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Augur — {% block title %}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-page="{{ active }}">
+  <header class="top">
+    <a class="brand" href="/">Augur <span class="muted">{{ app_version }}</span></a>
+    <nav>
+      {% for url, label in [("/", "Dashboard"), ("/positions", "Positions"), ("/signals", "Signals"), ("/news", "News"), ("/control", "Control")] %}
+      <a href="{{ url }}" class="{{ 'active' if active == url else '' }}">{{ label }}</a>
+      {% endfor %}
+    </nav>
+    <div class="pills">
+      <span id="pill-mode" class="pill">mode: —</span>
+      <span id="pill-cb" class="pill">CB: —</span>
+      <span id="pill-ws" class="pill off" title="WebSocket /ws/events">live</span>
+      <button id="logout" class="link" type="button" hidden>выйти</button>
+    </div>
+  </header>
+
+  <section id="login" class="card login" hidden>
+    <h2>Вход</h2>
+    <p class="muted">Токен API (<code>API_AUTH_TOKEN</code> из <code>.env</code>). Хранится только в этой вкладке (sessionStorage).</p>
+    <form id="login-form">
+      <input id="token" type="password" autocomplete="off" placeholder="Bearer token" required>
+      <button type="submit">Войти</button>
+    </form>
+    <p id="login-error" class="error" hidden></p>
+  </section>
+
+  <main id="main" hidden>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="muted">Только мониторинг. Команды (кроме kill switch) — в CLI <code>augur</code>.</footer>
+  <script src="/static/app.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

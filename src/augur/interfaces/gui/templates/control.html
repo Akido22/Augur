@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Control{% endblock %}
+{% block content %}
+<div class="grid">
+  <div class="card">
+    <h2>Состояние</h2>
+    <dl id="ctl-status" class="kv"></dl>
+  </div>
+  <div class="card danger">
+    <h2>Kill switch</h2>
+    <p>KILLED, режим ANALYSIS_ONLY, отмена всех ордеров, при flatten — закрытие позиций. Кода не требует. Снять можно только в CLI: <code>augur cb reset --confirm</code> (с одноразовым кодом).</p>
+    <label><input id="ks-flatten" type="checkbox" checked> закрыть позиции (flatten, reduce_only)</label>
+    <div><button id="ks-button" class="btn-danger" type="button">KILL SWITCH</button></div>
+    <pre id="ks-result" class="small" hidden></pre>
+  </div>
+</div>
+<div class="card">
+  <h2>Аудит</h2>
+  <button id="verify-chain" type="button">Проверить hash-chain audit_log</button>
+  <span id="verify-result" class="small"></span>
+</div>
+<div class="card">
+  <h2>Команды CLI</h2>
+  <p class="muted small">В GUI 0.9.0 только мониторинг и kill switch. Остальное — в CLI, с кодом или <code>--confirm</code>:</p>
+  <pre class="small">augur mode show
+augur mode set &lt;MODE&gt; --confirm         # повышение на шаг с кодом, понижение сразу
+augur orders approve &lt;id&gt; --confirm      # первый ордер MICRO_LIVE
+augur cb status | cb reset --confirm
+augur news lift &lt;id&gt; --confirm
+augur signals explain &lt;id&gt;               # цепочка решения в терминале
+augur audit verify-chain</pre>
+</div>
+{% endblock %}
+{% block scripts %}<script>Augur.pages.control();</script>{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Positions{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Открытые позиции</h2>
+  <table class="tbl"><thead><tr><th>venue</th><th>symbol</th><th>mode</th><th class="num">qty</th><th class="num">avg</th><th class="num">realized</th><th class="num">unrealized</th><th class="num">SL</th><th class="num">TP</th><th>обновлено</th></tr></thead>
+  <tbody id="positions"></tbody></table>
+</div>
+<div class="card">
+  <div class="row"><h2>Ордера</h2>
+    <select id="order-state"><option value="">все</option><option>PENDING</option><option>SUBMITTED</option><option>PARTIAL</option><option>FILLED</option><option>REJECTED</option><option>CANCELLED</option><option>UNKNOWN</option></select>
+  </div>
+  <table class="tbl"><thead><tr><th>создан</th><th>id</th><th>state</th><th>mode</th><th>symbol</th><th>side</th><th class="num">qty</th><th class="num">filled</th><th class="num">avg</th><th class="num">fee</th><th></th></tr></thead>
+  <tbody id="orders"></tbody></table>
+  <p class="muted small">Отмена ордера и закрытие позиции в GUI 0.9.0 недоступны: используйте kill switch или CLI.</p>
+</div>
+{% endblock %}
+{% block scripts %}<script>Augur.pages.positions();</script>{% endblock %}

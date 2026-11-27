@@ -313,7 +313,8 @@ class SignalReady(BaseModel, frozen=True):
     strength: float                      # [0, 1]
     source: Literal["classic", "fusion", "classic_fallback"]
     explanation_ref: str | None          # source="fusion": FusedSignal.explanation_ref (строка-ссылка, не FK, FUSION SPEC §4.6); classic/classic_fallback: None
-    risk_flags: list[str]                # напр. ["news_negative", "high_vol", "ml_disabled"]
+    risk_flags: list[RiskFlag]           # {code, severity} — тип из augur.fusion.contract (FUSION SPEC §4.6),
+                                         # напр. [{"code": "ml_disabled", "severity": "low"}]
     strategy_signal_ids: list[str]
     fused_signal_id: str | None
     created_at: datetime
@@ -510,7 +511,7 @@ CREATE TABLE signals (
     strength       REAL    NOT NULL CHECK (strength BETWEEN 0 AND 1),
     source         TEXT    NOT NULL CHECK (source IN ('classic','fusion','classic_fallback')),
     fused_signal_id TEXT   REFERENCES fused_signals(id),
-    risk_flags_json TEXT   NOT NULL DEFAULT '[]',
+    risk_flags_json TEXT   NOT NULL DEFAULT '[]', -- JSON-массив {code, severity}
     explanation_ref TEXT,
     stop_loss      TEXT,
     take_profit    TEXT,
@@ -1020,7 +1021,7 @@ Signal Engine выполняет **только структурную** вал�
 | V4 | `asset` совпадает с отправленным в `FusionRequest` | invalid |
 | V5 | `expires_at > now` | invalid (`expired`) |
 | V6 | ответ получен: клиент не бросил исключение (в т.ч. таймаут) и не вернул `None` | unavailable |
-| V7 | `action ∈ {BUY, SELL}` при отсутствии хотя бы одного согласного классического сигнала → добавить флаг `fusion_contrarian` (не invalid) `[ДОПУЩЕНИЕ]` | flag |
+| V7 | `action ∈ {BUY, SELL}` при отсутствии хотя бы одного согласного классического сигнала → добавить флаг `{code: "fusion_contrarian", severity: "medium"}` (не invalid) `[ДОПУЩЕНИЕ]` | flag |
 
 invalid → `FUSION_INVALID` (`WARN`) в `audit_log` с перечнем ошибок; unavailable → `FUSION_FALLBACK` (`WARN`). Невалидный сигнал не исправляется.
 
@@ -1041,7 +1042,7 @@ async def resolve_signal(self, strat_signals, ctx) -> SignalReady:
         await self.repo.save_fused(fused, req, valid=False, errors=errors)   # для streak
         await self.audit.append(event=event, severity="WARN", ...)          # FUSION_INVALID | FUSION_FALLBACK (п. 5.5)
         await self.bus.publish(FusionInvalid(idempotency_key=req.idempotency_key, errors=errors))
-        return classic.with_source("classic_fallback").add_flag("ml_disabled")
+        return classic.with_source("classic_fallback").add_flag(RiskFlag(code="ml_disabled", severity="low"))
     fused_id = await self.repo.save_fused(fused, req, valid=True, errors=[])
     return SignalReady.from_fused(fused, fused_id=fused_id, parents=strat_signals)
 ```
@@ -1185,12 +1186,14 @@ class ModeController:
 | R12 | `concentration` | `(экспозиция символа + новый notional) / equity ≤ max_symbol_concentration_pct` | positions |
 | R13 | `position_size` | `0 < sized_qty`, `notional ≤ max_position_pct_equity × equity`, ≥ `min_qty`/`min_notional` | PositionSizer, InstrumentSpec |
 | R14 | `margin_available` | достаточно cash/маржи | account_state |
-| R15 | `risk_flags` | ни один флаг не входит в `blocking_flags` (конфиг; напр. `news_halt`, `fusion_contrarian` в MICRO_LIVE) | SignalReady |
+| R15 | `risk_flags` | для открывающих ордеров (`BUY`/`SELL`): ни один `flag.code` не входит в `blocking_flags` (конфиг; напр. `news_halt`, `fusion_contrarian` в MICRO_LIVE) и нет флага с `severity = "high"`; `CLOSE`/`REDUCE` чек не блокирует | SignalReady |
 | R16 | `news_pause` | стратегия/символ не приостановлены новостным контуром | NewsReactionRules |
 | R17 | `duplicate_intent` | нет активного ордера с тем же направлением по тому же сигналу | orders |
 | R18 | `micro_live_cap` | в MICRO_LIVE notional ≤ `micro_live_max_notional` | config |
 
-Флаги могут **уменьшать** размер: `soft_flags` (напр. `news_mixed`, `high_vol`) → `sized_qty × risk_flag_multiplier` (по умолчанию 0.5) `[ДОПУЩЕНИЕ]`. Такой вердикт записывается как `decision_audit.risk_verdict='REDUCED'`; без уменьшения — `'APPROVED'`.
+Флаги могут **уменьшать** размер: `soft_flags` — список `code` (напр. `news_mixed`, `high_vol`); флаг с таким `code` → `sized_qty × risk_flag_multiplier` (по умолчанию 0.5) `[ДОПУЩЕНИЕ]`. Такой вердикт записывается как `decision_audit.risk_verdict='REDUCED'`; без уменьшения — `'APPROVED'`.
+
+Формат флагов един по всей цепочке: `{code, severity}` (`severity ∈ {low, medium, high}`, тип `RiskFlag` из FUSION SPEC §4.6) — в `FusedSignal`, `SignalReady`, `signals.risk_flags_json` и реакциях новостного контура. Конфиг Risk Gate (`blocking_flags`, `soft_flags`) сопоставляется только по `code`; `severity = "high"` блокирует вход сам по себе. Системные флаги Signal Engine: `ml_disabled` — `low`, `fusion_contrarian` — `medium`.
 
 При провале любого чека: `RiskVerdict.approved=False`, `signals.status='REJECTED'`, `decision_audit.risk_verdict='REJECTED'`, `audit_log: RISK_REJECTED` с полным списком `CheckResult` в `payload_json`.
 
@@ -1417,7 +1420,7 @@ rules:
   - name: mixed_reduce_risk
     when: {abs_sentiment_lt: 0.2, importance_in: [high], window_count_gte: 3}
     action: add_risk_flag           # soft flag "news_mixed" → уменьшение размера
-    flag: news_mixed
+    flag: {code: news_mixed, severity: medium}
   - name: macro_event_blackout
     when: {macro_event: [FOMC, NFP, CPI], minutes_before: 15, minutes_after: 15}
     action: pause_symbol

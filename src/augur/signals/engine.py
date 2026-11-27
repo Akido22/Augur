@@ -8,6 +8,7 @@ ARCHITECTURE.md §2.5, §2.7, §5.5–5.6; ML_LLM_FUSION_SPEC.md §4.6, §6.3.
   (`FUSION_INVALID`); недоступный Fusion — `FUSION_FALLBACK` (режим ML-disabled).
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -23,12 +24,25 @@ from augur.db.audit import append_audit
 from augur.fusion.client import FusionClient, FusionRequest
 from augur.fusion.contract import FusedSignal
 from augur.ids import ULID_RE, new_ulid
+from augur.signals.ready import (
+    DECISION_AUDIT_REF_PREFIX,
+    FLAG_ML_DISABLED,
+    SignalReady,
+    combine_classic,
+)
 from augur.strategies.base import Signal, SignalAction
 
 if TYPE_CHECKING:
+    from augur.signals.repository import SignalRepository
     from augur.strategies.base import Strategy
 
-__all__ = ["AUDIT_ACTOR", "SignalEngine", "StrategyContext", "StrategySignal"]
+__all__ = [
+    "AUDIT_ACTOR",
+    "DECISION_AUDIT_REF_PREFIX",
+    "SignalEngine",
+    "StrategyContext",
+    "StrategySignal",
+]
 
 AUDIT_ACTOR = "signal_engine"
 log = logging.getLogger(__name__)
@@ -133,6 +147,10 @@ class SignalEngine:
         audit_conn: соединение SQLite с таблицей `audit_log`; без него отбраковка
             пишется только в лог процесса.
         clock: текущее время, Unix ms UTC (инъекция для тестов и бэктеста).
+        fusion_enabled: `settings.fusion.enabled`; False → `resolve_signal` только классика.
+        fusion_timeout_ms: `settings.fusion.timeout_ms` — таймаут вызова Fusion.
+        repo: репозиторий сигналов; если задан, `resolve_signal` сохраняет сигналы стратегий,
+            `fused_signals` и итоговый `signals(kind='final')` (нужен для FK `decision_audit`).
     """
 
     def __init__(
@@ -141,10 +159,16 @@ class SignalEngine:
         *,
         audit_conn: sqlite3.Connection | None = None,
         clock: Callable[[], int] | None = None,
+        fusion_enabled: bool = False,
+        fusion_timeout_ms: int = 1500,
+        repo: "SignalRepository | None" = None,
     ) -> None:
         self._fusion = fusion_client
-        self._audit_conn = audit_conn
+        self._audit_conn = audit_conn if audit_conn is not None else (repo.conn if repo else None)
         self._clock = clock or (lambda: int(time.time() * 1000))
+        self._fusion_enabled = fusion_enabled
+        self._fusion_timeout_s = fusion_timeout_ms / 1000
+        self._repo = repo
 
     # --- стратегии --------------------------------------------------------------
 
@@ -259,6 +283,82 @@ class SignalEngine:
                 continue
             out.append(valid)
         return out
+
+    # --- итоговый сигнал (ARCHITECTURE.md §5.6) ------------------------------------
+
+    async def resolve_signal(self, strat_signals: Sequence[StrategySignal]) -> SignalReady | None:
+        """Сигналы стратегий одного бара → `SignalReady` (вход Risk Gate).
+
+        1) `combine_classic`; 2) fusion выключен → `source="classic"`;
+        3) иначе Fusion по первому сигналу (детерминированно: сортировка по
+           `strategy_version`, `signal_id`) с заранее выданным ULID `decision_audit`
+           в `context["decision_audit_id"]` (FUSION SPEC §4.6 `explanation_ref`);
+        4) таймаут / исключение / None / невалидный выход → `classic_fallback` + флаг
+           `ml_disabled` (low) + `FUSION_FALLBACK` | `FUSION_INVALID` в `audit_log`;
+        5) валидный — `SignalReady.from_fused` (V7 `fusion_contrarian`).
+
+        Ничего не исполняет: результат обязан пройти Risk Gate.
+
+        Returns:
+            None, если сигналов нет.
+        """
+        now_ms = self._clock()
+        ordered = sorted(strat_signals, key=lambda s: (s.strategy_version, s.signal_id))
+        classic = combine_classic(ordered, now_ms=now_ms)
+        if classic is None:
+            return None
+        if self._repo is not None:
+            for s in ordered:
+                self._repo.insert_strategy_signal(s, created_ts=now_ms)
+
+        result: SignalReady
+        if not self._fusion_enabled:
+            result = classic.with_source("classic")
+        else:
+            result = await self._resolve_fused(ordered, classic, now_ms)
+
+        if self._repo is not None:
+            self._repo.insert_final(result, timeframe=ordered[0].timeframe)
+            self._repo.commit()
+        return result
+
+    async def _resolve_fused(
+        self, ordered: Sequence[StrategySignal], classic: SignalReady, now_ms: int
+    ) -> SignalReady:
+        base = self.build_request(ordered[0])
+        decision_id = new_ulid(now_ms)
+        request = base.model_copy(
+            update={"context": {**base.context, "decision_audit_id": decision_id}}
+        )
+        fused: FusedSignal | None = None
+        event = "FUSION_FALLBACK"
+        try:
+            fused = await asyncio.wait_for(
+                self._fusion.get_fused_signal(request), timeout=self._fusion_timeout_s
+            )
+            errors = [] if fused is not None else ["fusion returned no signal"]
+        except ValidationError as e:
+            event, errors = "FUSION_INVALID", [f"client validation: {e.error_count()}"]
+        except Exception as e:  # noqa: BLE001 — сбой/таймаут Fusion → ML-disabled, не падаем
+            errors = [f"{type(e).__name__}: {e}"]
+
+        valid: FusedSignal | None = None
+        if fused is not None:
+            valid, errors = self.validate_fused(fused, request, now_ms)
+            if valid is None:
+                event = "FUSION_INVALID"
+                if self._repo is not None:
+                    self._repo.save_fused(fused, valid=False, errors=errors)  # для streak CB
+        if valid is None:
+            self._audit(event, ordered[0], request, errors)
+            return classic.with_source("classic_fallback").add_flag(FLAG_ML_DISABLED)
+
+        fused_id = (
+            self._repo.save_fused(valid, valid=True, errors=[])
+            if self._repo is not None
+            else new_ulid(now_ms)
+        )
+        return SignalReady.from_fused(valid, fused_id=fused_id, parents=ordered, now_ms=now_ms)
 
     def _audit(
         self, event: str, signal: StrategySignal, request: FusionRequest, errors: list[str]

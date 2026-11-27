@@ -25,6 +25,8 @@ __all__ = [
 
 STUB_FUSION_CONFIG_VERSION = "stub-0.4.0"
 STUB_EXPLANATION_REF = "fusion_stub"
+# Совпадает с augur.signals.ready.DECISION_AUDIT_REF_PREFIX (fusion не импортирует signals).
+DECISION_AUDIT_REF_PREFIX = "decision_audit:"
 # Пространство имён uuid5 для детерминированного signal_id заглушки.
 STUB_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "augur:fusion:stub")
 
@@ -53,13 +55,21 @@ class StubFusionClient:
     """Заглушка Fusion: без ML/LLM, детерминированная по `idempotency_key`.
 
     - `HOLD`, если в `context` есть технический сигнал (`strategy_signal_id`), иначе `NO_SIGNAL`.
-    - `strength=0`, `reason="fusion_stub"`, `explanation_ref="fusion_stub"`, `risk_flags=[]`.
+    - `strength=0`, `reason="fusion_stub"`, `risk_flags=[]`.
+    - `explanation_ref="decision_audit:<ulid>"`, если Signal Engine передал
+      `context["decision_audit_id"]` (0.5.0+, FUSION SPEC §4.6), иначе `"fusion_stub"`.
     - `signal_id = uuid5(STUB_NAMESPACE, idempotency_key)`; TTL — половина бара
       (ML_LLM_FUSION_SPEC.md §4.2 `signal_ttl_fraction_of_bar`).
     """
 
     async def get_fused_signal(self, request: FusionRequest) -> FusedSignal | None:
         has_tech = request.context.get("strategy_signal_id") is not None
+        decision_id = request.context.get("decision_audit_id")
+        explanation_ref = (
+            f"{DECISION_AUDIT_REF_PREFIX}{decision_id}"
+            if isinstance(decision_id, str) and decision_id
+            else STUB_EXPLANATION_REF
+        )
         return FusedSignal(
             api_version=versions.API_VERSION,
             signal_id=str(uuid.uuid5(STUB_NAMESPACE, request.idempotency_key)),
@@ -70,7 +80,7 @@ class StubFusionClient:
             action=SignalAction.HOLD if has_tech else SignalAction.NO_SIGNAL,
             strength=0.0,
             reason="fusion_stub",
-            explanation_ref=STUB_EXPLANATION_REF,
+            explanation_ref=explanation_ref,
             risk_flags=[],
             source_breakdown={"ml": 0.0, "tech": 1.0, "llm": 0.0, "rules_fired": []},
             fusion_config_version=STUB_FUSION_CONFIG_VERSION,

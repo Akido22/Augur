@@ -22,11 +22,19 @@ When NOT to use:
 2. Убедись, что LLM-вход прошёл `llm-output-validation` (schema + variance filter). Если нет, сначала примени его.
 3. Используй `augur.fusion.contract.FusedSignal` — не переопределяй модель. Схема — `ML_LLM_FUSION_SPEC.md` §4.6 (источник истины): `api_version`, `signal_id`, `idempotency_key`, `asset`, `timestamp`, `expires_at`, `action` (6 значений `SignalAction`), `strength`, `reason`, `explanation_ref`, `risk_flags` (`{code, severity}`), `source_breakdown` (`float | list[str] | dict`), `fusion_config_version`. `model_config = ConfigDict(frozen=True, extra="forbid")`.
 4. Веса и пороги бери только из `FusionConfig`. Конфиг валидируется при старте: сумма весов = 1, все пороги заданы. В `fuse()` нет числовых литералов, кроме 0 и 1.
-5. Реализуй `fuse()` как чистую детерминированную функцию `(ml_pred, llm_ctx, tech_signal, cfg) -> FusedSignal | None`. Никакого I/O и вызовов LLM внутри.
-6. Применяй veto в фиксированном порядке:
-   1. `ml_pred.confidence < cfg.ml_min_confidence` → вернуть `None` (сигнал отброшен), причину записать в audit.
-   2. В `llm_ctx.risk_flags` есть флаг с `severity="high"` → `action=HOLD`, вход заблокирован, флаг перенести в `risk_flags` как `{code, severity}`.
-   3. Направления ML и LLM противоречат друг другу → приоритет у risk-контура: `action=HOLD`, добавить `"ml_llm_conflict"` в `source_breakdown["rules_fired"]` (системные метки — не `risk_flags`, FUSION SPEC §4.5).
+5. Реализуй `fuse()` как чистую детерминированную функцию `(ml_pred, llm_ctx, tech_signal, cfg, *, position, breaker, now_ms, bar_ms) -> FusedSignal` (`ML_LLM_FUSION_SPEC.md` §4.5). Никакого I/O, часов и вызовов LLM внутри. «Сигнал отброшен» — это `NO_SIGNAL`, а не `None`.
+6. Применяй правила строго в порядке §4.3 (числа — только из `FusionConfig`):
+   1. Circuit breaker открыт → `HOLD`.
+   2. ML отсутствует или устарел → `NO_SIGNAL`.
+   3. ML veto: `direction = flat` или `confidence < cfg.ml_min_confidence` → `NO_SIGNAL`.
+   4. Направление задаёт только ML: взвешенный скор ML+tech противоположен по знаку → `HOLD` (tech гасит, но не разворачивает).
+   5. LLM только ослабляет: `strength = min(|base|, max(0, d · full))` при `llm_can_amplify = false`.
+   6. Конфликт ML и LLM (`d · llm_score ≤ −cfg.conflict.llm_opposite_threshold`) → `strength × cfg.conflict.strength_multiplier`, `"ml_llm_conflict"` в `source_breakdown["rules_fired"]`.
+   7. LLM veto: флаг с `severity="high"` → вход заблокирован (`HOLD`); при открытой позиции — действие из `cfg.on_high_flag_with_open_position` (по умолчанию `REDUCE`). Флаги `medium` → `strength × cfg.medium_flag_multiplier`. Все LLM-флаги переносятся в `risk_flags` как `{code, severity}`.
+   8. Режим из `cfg.blocked_entry_regimes` без открытой позиции → `HOLD`.
+   9. ML-only (LLM недоступен, отклонён или устарел) → `strength × cfg.ml_only_strength_multiplier`, `"llm_unavailable"` в `rules_fired`.
+   10. `strength < cfg.entry_threshold` → `HOLD`.
+   Veto никогда не блокирует `CLOSE` и `REDUCE` — действия, снижающие риск.
 7. Проведи constraint-based verification (§5) после `fuse()`:
    - `0 <= strength <= 1`, `expires_at > timestamp`, `api_version == versions.API_VERSION`;
    - `action` согласован с `source_breakdown`;
@@ -40,7 +48,7 @@ When NOT to use:
 9. TTL: потребитель отбрасывает сигнал, если `now >= expires_at`, и пишет причину в audit (`FUSION_INVALID`, ARCHITECTURE.md §5.5 V5).
 10. Fallback: если Fusion недоступен, бросил исключение или вернул невалидный `FusedSignal`, Signal Engine переходит в режим ML-disabled (только классические стратегии) и пишет WARNING в `audit_log` с причиной. Не падай и не повторяй вызов в цикле. Серию невалидных сигналов учитывает circuit breaker (`auto-trade-risk-gate`).
 11. Сохраняй связи: каждый `fused_signal` ссылается на `ml_predictions.id` и `llm_calls.id`.
-12. Тесты: каждое veto, конфликт, TTL, fallback, property-test инвариантов шага 7. Запусти `pytest tests/fusion`.
+12. Тесты: каждое правило шага 6, конфликт, TTL, fallback, property-test инвариантов §4.3 (`hypothesis`) и шага 7. Запусти `pytest tests/fusion`.
 
 ## Examples
 ```python

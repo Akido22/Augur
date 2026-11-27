@@ -70,9 +70,9 @@
 
 ```python
 # src/augur/versions.py
-DB_SCHEMA_VERSION: int = 4   # схема, которую ожидает этот код (= последний файл миграции)
+DB_SCHEMA_VERSION: int = 5   # схема, которую ожидает этот код (= последний файл миграции)
 API_VERSION: str = "1.0"     # контракт Fusion (fused_signal), который реализует этот код
-CONFIG_VERSION: int = 2      # формат конфига, который читает этот код
+CONFIG_VERSION: int = 3      # формат конфига, который читает этот код
 
 __all__ = ["DB_SCHEMA_VERSION", "API_VERSION", "CONFIG_VERSION"]
 ```
@@ -205,8 +205,8 @@ CREATE TABLE artifacts (
 | **0.3.0** | Стратегии + бэктест | Strategy Framework (интерфейс, реестр), детерминированный Backtest Engine, метрики, CLI `strategies list` / `backtest` | `db_schema` без изменений; первые стратегии `sma_cross@1.0.0`, `rsi@1.0.0`. Таблица `backtest_runs` — отложено, не реализовано в 0.3.0 |
 | **0.4.0** | Fusion-контракт + Signal Engine | Signal Engine (`StrategyContext`, `StrategySignal`, `generate_signals`), таблица `signals` (создана в `0001_core`), спецификация и валидация контракта, stub-реализация Fusion, таблица `fused_signals` (`0003_fusion_contract`) | `api_version` → 1.0; `db_schema` +1; `config` → 1 (`CONFIG_VERSION`) |
 | **0.5.0** | Risk Gate | Лимиты (позиция, дневной убыток, экспозиция), вердикты, таблица `decision_audit` | `db_schema` +1; `config` +1 (лимиты риска) |
-| **0.6.0** | PAPER | Симулятор исполнения, таблица orders, жёсткая проверка полноты версий перед ордером (§6.2) | `db_schema` +N (orders, fills); `config` +1 (режим исполнения) |
-| **0.7.0** | MICRO_LIVE | Реальное исполнение с микролимитами, kill switch, сверка позиций с брокером | `config` +1 (ключи, микролимиты); `db_schema` по необходимости |
+| **0.6.0** | PAPER | Execution в PAPER по ARCHITECTURE.md §14 этап 6: `OrderManager`, state machine, идемпотентность, `Reconciler`, circuit breaker, kill switch, e2e; симулятор исполнения с общей с бэктестом моделью издержек; жёсткая проверка полноты версий перед ордером (§6.2) | `db_schema` +1 (`0005_execution`: fills; orders — с 0001); `config` +1 (исполнение, CB) |
+| **0.7.0** | MICRO_LIVE | Реальное исполнение с микролимитами, `ModeController` с кодами, ручное подтверждение 1-го ордера, kill switch и сверка позиций на реальном брокере | `config` +1 (ключи, микролимиты); `db_schema` по необходимости |
 | **0.8.0** | News | Сбор и нормализация новостей, LLM-оценка новостей | `db_schema` +N (news); первый `prompt_news_v1`; `api_version` 1.1 (поле news_score) |
 | **0.9.0** | GUI/CLI | Полный CLI, GUI мониторинга, просмотр цепочки решения по ордеру | `config` по необходимости |
 | **0.10.0** | ML+LLM | Реальная реализация Fusion: ML-модель + LLM, реестр моделей, replay-тест | `ml_model` с `lightgbm_v1`; новые `<стратегия>@X.Y.Z`, `prompt_*_vN`; `api_version` 1.x или **BREAKING** 2.0 |

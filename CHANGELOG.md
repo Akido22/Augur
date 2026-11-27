@@ -7,6 +7,110 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-27
+
+**Компоненты:** db_schema_version 4 → 5 · api_version 1.0 (без изменений) · config_version 2 → 3 · артефакты `sma_cross@1.0.0`, `rsi@1.0.0`; `ml_model_version` / `llm_prompt_version` = `n/a` (VERSIONING.md §2.3); системные выходы — `strategy_version` `system:sl` / `system:tp` / `system:flatten`
+
+### Добавлено
+
+- Execution в режиме PAPER (`augur.execution`, ARCHITECTURE.md §7, §14 этап 6). Единственный путь
+  к площадке: `RiskGate` → `decision_audit` (COMMIT) → `OrderManager`.
+- `OrderManager`: перед ордером перечитывает закоммиченную запись `decision_audit` и проверяет
+  полноту версий (`assert_auditable`, VERSIONING.md §6.2). Затем одной транзакцией создаёт PENDING
+  и заполняет `decision_audit.order_id`, после этого `place_order`. Дальше по ответу площадки:
+  переходы state machine → fills → позиции → `decision_audit.execution_result` (записывается один раз).
+  Работает только при `mode=PAPER` и venue `paper`.
+- Идемпотентность: детерминированный `client_order_id` (`jn` + base32(sha256), 24 символа,
+  ARCH §7.3). Повтор того же сигнала или решения даёт `ORDER_DUPLICATE_SUPPRESSED`, на площадку
+  ничего не уходит.
+- Сетевые сбои (ARCH §4.2): `place_order` не повторяется вслепую. Сначала `get_order(coid)`.
+  Если площадка ответила «нет такого», ордер повторяется один раз с тем же `client_order_id`.
+  Если статус установить нельзя, ордер получает `UNKNOWN` (R5 блокирует символ до реконсиляции).
+- State machine ордера (`ALLOWED_TRANSITIONS`, ARCH §7.3). Если площадка отвечает итоговым
+  статусом, промежуточные переходы (`PENDING → SUBMITTED → FILLED`) проходятся явно, и каждый
+  попадает в аудит. Запоздалые ответы по терминальным ордерам игнорируются.
+- Частичные исполнения: fills дедуплицируются по `(order_id, venue_fill_id)`, позиция
+  обновляется по каждому fill. Остаток PARTIAL MARKET-ордера отменяется через
+  `partial_timeout_s` (60 с).
+- `PositionManager` (средняя цена, частичное закрытие, переворот, realized PnL за вычетом
+  комиссий) и `PortfolioTracker` (`portfolio_snapshots`: `day_pnl` от начала UTC-дня, пик,
+  просадка).
+- `CircuitBreaker` (ARCH §7.4). Триггеры: серия убытков, просадка, дневной убыток, ошибки
+  адаптера (окно / fatal), невалидные fused_signal (серия или доля в окне), расхождение
+  реконсиляции. При срабатывании: `TRIPPED` (персистентно), отмена ордеров на вход, PAPER-hold,
+  `CB_TRIPPED`. Сброс — только одноразовым 6-значным кодом (TTL 120 с) → режим PAPER, `CB_RESET`.
+- `KillSwitch`: `KILLED` (переживает рестарт), режим ANALYSIS_ONLY, `cancel_all`, при flatten —
+  закрытие позиций reduce_only-ордерами с аудитом (`KILL_SWITCH`). Код на включение не нужен.
+- Защитные выходы SL/TP (`check_protective_exits`) срабатывают всегда, в том числе при
+  `TRIPPED` и `KILLED`.
+- `Reconciler`: сверяет активные ордера и позиции БД с площадкой. Ордер, которого площадка не
+  знает → REJECTED. Расхождение позиций > `qty_step` → `RECONCILE_MISMATCH` и срабатывание CB.
+- `risk/post_trade.py`: `RiskMetrics`, чистая `evaluate_triggers`, `RiskMetricsBuilder` (SQLite),
+  `PostTradeMonitor` (после fill: снимок → метрики → CB).
+- `ResilientAdapter` (ARCH §4.2): повторы для чтения и идемпотентных операций; `place_order` —
+  одна попытка с таймаутом. Хук `on_error` считает ошибки площадки для CB (`RejectedError` не
+  считается).
+- `ModeStore` — минимальная запись `mode_state` + `MODE_CHANGED`: только понижение и PAPER после
+  reset. Повышение с кодами (`ModeController`) — 0.7.0.
+- `TradingPipeline` и `build_paper_stack` — сборка PAPER: восстановление PaperAdapter из SQLite
+  после рестарта, снимок портфеля перед каждым решением (R10).
+- CLI: `augur kill-switch [--flatten/--no-flatten]`, `augur cb status`, `augur cb reset --confirm`,
+  `augur orders list`.
+- Миграция `0005_execution.sql` (`expand`): `fills` (DDL ARCH §3.2).
+- Тесты: state machine, `client_order_id`, издержки, `ResilientAdapter`, позиции и снимки,
+  восстановление после сбоев сети, частичные исполнения, CB / kill switch с рестартом, reset по
+  коду, Reconciler, CLI, e2e PAPER.
+
+### Изменено
+
+- Модель издержек вынесена в `augur.backtest.costs.CostModel` и теперь общая для `Backtester` и
+  `PaperAdapter` (ARCH §4.6, §6.3). Результаты бэктеста не изменились.
+- `PaperAdapter`: исполняет по bid/ask с проскальзыванием и списывает комиссию; отдаёт `fills`,
+  `fee`, `fee_ccy`; отклоняет `reduce_only`, если ордер увеличил бы позицию; `restore()` и
+  `set_clock()`; у синтетического tick есть «24h-объём» (без него R9 в PAPER всегда отклонял
+  сигнал). Издержки по умолчанию нулевые, PAPER-стек берёт их из конфига.
+- `OrderAck`: новые поля `fee`, `fee_ccy`, `fills: list[VenueFill]`, `reject_reason` (все с
+  дефолтами). Новый DTO `VenueFill`.
+- `call_with_retry`: необязательный параметр `on_error`.
+- Конфиг (config_version 3): `ExecutionSettings` (`EXECUTION__*`: комиссия, проскальзывание,
+  `partial_timeout_s`, `reconcile_interval_s`, `paper_start_cash`), `CircuitBreakerSettings`
+  (`CB__*`: `flatten_on_trip`, окно и порог ошибок адаптера, TTL кода сброса),
+  `FusionSettings.invalid_ratio` / `invalid_window`. У всех полей есть дефолты, `.env` менять не
+  нужно.
+- `DB_SCHEMA_VERSION`: 4 → 5; `CONFIG_VERSION`: 2 → 3.
+- VERSIONING.md §4: объём 0.6.0 / 0.7.0 приведён к ARCH §14 (решение пользователя); §2.2 —
+  константы.
+- Skill `auto-trade-risk-gate`: freeze, kill switch и сброс приведены к ARCH §7.4 (`cb reset
+  --confirm` → PAPER, автосброса нет); `client_order_id` из `(signal_id, leg, attempt)`;
+  порядок записи `decision_audit` — по VERSIONING §6.2.
+- CLAUDE.md: команды `kill-switch`, `cb status|reset`.
+
+### Безопасность
+
+- Kill switch и CB персистентны и переживают рестарт; снять их можно только одноразовым кодом
+  из CLI.
+- Ордер без закоммиченной полной записи `decision_audit` не создаётся и не отправляется
+  (`UnauditableOrderError` / `ExecutionRefusedError`).
+- В 0.6.0 `OrderManager` отказывается работать с адаптером, отличным от `paper`, и в режимах
+  MICRO_LIVE / FULL_AUTO.
+
+### Примечания
+
+- Системные выходы (SL/TP, flatten) снижают риск и идут мимо сигнального контура и Risk Gate —
+  так требует ARCH §7.4. Для них пишутся собственные `signals(kind='final', action='CLOSE')` и
+  `decision_audit` с полным набором версий; ордер только `reduce_only`.
+- `[ДОПУЩЕНИЕ]` Счётчики серий (убытки, невалидные fused_signal) и пик для просадки считаются с
+  последнего `cb reset`. PnL сделки для серии убытков = realized PnL закрывающего fill. День для
+  `day_pnl` — UTC.
+- `[ДОПУЩЕНИЕ]` Расхождение позиций в PAPER тоже вызывает CB (ARCH §7.4 называет только live):
+  БД и PaperAdapter обязаны совпадать точно.
+- `DbWriter` (single writer, ARCH §3.1) отложен до оркестратора (решение пользователя); пока
+  используются синхронные транзакции `sqlite3`.
+- Notify ещё не реализован: CRITICAL-события CB и kill switch пишутся в `audit_log` и
+  `logging.critical`.
+- Пример short-circuit в skill `auto-trade-risk-gate` (раздел Examples) всё ещё расходится с
+  ARCH §7.2 (код следует ARCH) — не исправлялся.
+
 ## [0.5.0] - 2026-11-27
 
 **Компоненты:** db_schema_version 3 → 4 · api_version 1.0 (без изменений) · config_version 1 → 2 · артефакты `sma_cross@1.0.0`, `rsi@1.0.0`; `ml_model_version` / `llm_prompt_version` = `n/a` (VERSIONING.md §2.3)

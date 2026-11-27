@@ -59,6 +59,33 @@ class FusionSettings(BaseModel):
     endpoint: str | None = None  # None → in-process StubFusionClient
     timeout_ms: int = 1500
     max_invalid_streak: int = 5  # для CB-триггера (ARCHITECTURE.md §7.4)
+    # CB-триггер по доле невалидных (ARCH §7.4): > invalid_ratio за последние invalid_window.
+    invalid_ratio: Decimal = Field(default=Decimal("0.5"), gt=0, le=1)
+    invalid_window: int = Field(default=20, ge=1)
+
+
+class ExecutionSettings(BaseModel):
+    """Исполнение (0.6.0, CONFIG_VERSION 3; ARCHITECTURE.md §6.3, §7.3).
+
+    Издержки — общая модель для бэктеста и PaperAdapter (`augur.backtest.costs.CostModel`),
+    в процентах: 0.1 = 0.1 %.
+    """
+
+    commission_pct: Decimal = Field(default=Decimal("0.1"), ge=0, lt=100)
+    slippage_pct: Decimal = Field(default=Decimal("0.05"), ge=0, lt=100)
+    # Остаток PARTIAL MARKET-ордера отменяется через partial_timeout_s [ДОПУЩЕНИЕ ARCH §7.3].
+    partial_timeout_s: int = Field(default=60, gt=0)
+    reconcile_interval_s: int = Field(default=30, gt=0)
+    paper_start_cash: Decimal = Field(default=Decimal("10000"), gt=0)
+
+
+class CircuitBreakerSettings(BaseModel):
+    """Circuit breaker (ARCHITECTURE.md §7.4). Пороги убытков — в `RiskLimits`."""
+
+    flatten_on_trip: bool = False  # закрывать позиции при срабатывании (по умолчанию — нет)
+    adapter_error_window_s: int = Field(default=300, gt=0)  # 5 мин
+    adapter_error_max: int = Field(default=5, ge=1)  # ≥ 5 RetryableError в окне → trip
+    reset_code_ttl_s: int = Field(default=120, gt=0)  # одноразовый код для `cb reset`
 
 
 class Settings(BaseSettings):
@@ -72,6 +99,8 @@ class Settings(BaseSettings):
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT"])
     risk: RiskLimits = RiskLimits()
     fusion: FusionSettings = FusionSettings()
+    execution: ExecutionSettings = ExecutionSettings()
+    cb: CircuitBreakerSettings = CircuitBreakerSettings()
     # Секреты — только SecretStr, только из окружения
     ccxt_exchange: str = "binance"
     ccxt_api_key: SecretStr | None = None

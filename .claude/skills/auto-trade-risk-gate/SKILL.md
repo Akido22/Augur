@@ -32,21 +32,20 @@ When NOT to use:
    - серия ошибок адаптера;
    - серия невалидных `fused_signal`.
    CB останавливает только новые входы. SL/TP и закрытие существующих позиций продолжают работать.
-4. Position freeze:
-   - при срабатывании CB выставь `_daily_loss_limit_reached = True`;
-   - `execute_signal()` возвращает `False`;
-   - `scan_and_trade()` завершается раньше;
-   - `_check_stop_loss_take_profit()` продолжает работать.
-   Сброс флага — только на следующий торговый день по календарю инструмента, с записью в `audit_log`.
-5. Kill switch: `augur kill-switch` в CLI и кнопка в GUI. Состояние персистентно (SQLite) и переживает рестарт. Снятие требует явного подтверждения режима (`augur kill-switch --release --mode PAPER`). Автоматического снятия нет.
+4. Position freeze (ARCH §7.4):
+   - при срабатывании CB `cb_state = TRIPPED` (персистентно): Risk Gate R2 отклоняет новые входы, открытые ордера на вход отменяются, режим → PAPER-hold;
+   - CLOSE/REDUCE по сигналам и защитные SL/TP продолжают работать (`OrderManager.check_protective_exits`);
+   - позиции не закрываются автоматически, если не включено `cb.flatten_on_trip`.
+   Автоматического сброса нет: только `augur cb reset --confirm` с одноразовым кодом → режим PAPER, запись `CB_RESET` в `audit_log`.
+5. Kill switch: `augur kill-switch [--flatten/--no-flatten]` в CLI и кнопка в GUI, без кода подтверждения на включение. `cb_state = KILLED` (персистентно, переживает рестарт), режим → ANALYSIS_ONLY, `cancel_all`, при flatten — закрытие позиций reduce_only-ордерами с аудитом. Снятие — тем же `augur cb reset --confirm` с кодом → PAPER; повторная эскалация — через `augur mode set`. Автоматического снятия нет.
 6. Идемпотентность:
-   - `client_order_id` генерируется детерминированно из `(signal_id, attempt_seq)`;
+   - `client_order_id` генерируется детерминированно из `(signal_id, leg, attempt)` (ARCH §7.3);
    - перед отправкой проверь `orders` на дубликат;
    - при сетевой ошибке сначала запроси статус по `client_order_id`, только потом повторяй отправку.
 7. `decision_audit` пишется на каждую попытку, включая отклонённые. Обязательные поля:
    - `app_version`, `strategy_version`, `ml_model_version`, `llm_prompt_version`;
-   - `risk_verdict`, `reason`, `client_order_id`, `mode`.
-   Нет записи в audit — нет ордера: запись идёт до отправки, в одной транзакции с резервированием.
+   - `risk_verdict`, `risk_reason`, `mode`; `client_order_id` — в `execution_result` (VERSIONING §6.1).
+   Нет записи в audit — нет ордера: `decision_audit` коммитится до отправки (VERSIONING §6.2); PENDING-ордер и `decision_audit.order_id` — одной транзакцией, затем отправка.
 8. Режимы:
    - PAPER по умолчанию;
    - MICRO_LIVE: минимальный размер и ручное подтверждение первого ордера;
@@ -74,21 +73,16 @@ def pre_trade_check(sig: FusedSignal, ctx: RiskContext, cfg: RiskConfig) -> Risk
 ```
 
 ```python
-def scan_and_trade(self):
-    self._check_stop_loss_take_profit()      # всегда, даже при CB
-    if self._daily_loss_limit_reached or self.kill_switch.on:
-        return
-    ...
-
-def execute_signal(self, sig) -> bool:
-    if self._daily_loss_limit_reached:
-        return False
-    ...
+async def on_tick(self, prices):
+    await orders.check_protective_exits(prices)   # всегда, даже при TRIPPED / KILLED
+    for sig in ready_signals:
+        await pipeline.process(sig)                # RiskGate R2 сам отклонит вход при CB
 ```
 
 ```bash
-augur kill-switch                       # стоп новых входов
-augur kill-switch --release --mode PAPER   # снятие с явным режимом
+augur kill-switch --flatten       # KILLED, ANALYSIS_ONLY, отмена ордеров, закрытие позиций
+augur cb status                   # состояние CB и режим
+augur cb reset --confirm          # одноразовый код → ARMED, режим PAPER
 ```
 
 ## Anti-patterns

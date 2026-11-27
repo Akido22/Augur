@@ -1,6 +1,8 @@
 """Загрузка и валидация настроек (ARCHITECTURE.md §2.2)."""
 
 from augur.config.settings import (
+    CircuitBreakerSettings,
+    ExecutionSettings,
     FusionSettings,
     RiskLimits,
     Settings,
@@ -10,6 +12,8 @@ from augur.config.settings import (
 )
 
 __all__ = [
+    "CircuitBreakerSettings",
+    "ExecutionSettings",
     "FusionSettings",
     "RiskLimits",
     "Settings",

@@ -5,7 +5,12 @@
 реального адаптера только на чтение. Ордера исполняются сразу (`FILLED`) по
 текущей цене; повтор с тем же `client_order_id` возвращает исходный ответ.
 
-Комиссии и проскальзывание — этап 0.3.0/0.6.0 (ARCHITECTURE.md §6.3).
+Издержки (0.6.0) — общая с бэктестом `CostModel` (ARCHITECTURE.md §4.6, §6.3): цена
+исполнения = bid/ask с проскальзыванием, комиссия = notional × c списывается из cash.
+По умолчанию издержки нулевые; Execution передаёт `CostModel` из `settings.execution`.
+
+Состояние (кэш, позиции) живёт в памяти; после рестарта процесса Execution восстанавливает
+его из SQLite через `restore()` — иначе Reconciler увидит расхождение позиций.
 """
 
 import hashlib
@@ -22,8 +27,10 @@ from augur.adapters.base import (
     OrderRequest,
     OrderState,
     RejectedError,
+    VenueFill,
     VenuePosition,
 )
+from augur.backtest.costs import CostModel
 from augur.data.models import Bar, Tick, timeframe_ms
 
 _PRICE_Q = Decimal("0.00000001")
@@ -45,6 +52,7 @@ class PaperAdapter:
         base_price: float = 100.0,
         price_source: MarketAdapter | None = None,
         clock_ms: int | None = None,
+        costs: CostModel | None = None,
     ) -> None:
         """
         Args:
@@ -54,6 +62,7 @@ class PaperAdapter:
             base_price: опорная цена синтетики.
             price_source: реальный адаптер для котировок (только чтение) или None.
             clock_ms: фиксированное «сейчас» (Unix ms) для детерминированных тестов.
+            costs: комиссия и проскальзывание; None — без издержек.
         """
         self.venue = "paper"
         self._seed = seed
@@ -65,6 +74,18 @@ class PaperAdapter:
         self._positions: dict[str, tuple[Decimal, Decimal]] = {}  # symbol -> (qty, avg_price)
         self._orders: dict[str, OrderAck] = {}
         self._last_price: dict[str, Decimal] = {}
+        self._costs = costs or CostModel()
+
+    def restore(self, *, cash: Decimal, positions: list[VenuePosition]) -> None:
+        """Восстановить кэш и позиции (после рестарта процесса; ордера не восстанавливаются)."""
+        self._cash = cash
+        self._positions = {
+            p.symbol: (p.qty, p.avg_price or Decimal(0)) for p in positions if p.qty != 0
+        }
+
+    def set_clock(self, clock_ms: int | None) -> None:
+        """Переставить фиксированное «сейчас» (тесты, replay)."""
+        self._clock_ms = clock_ms
 
     # --- жизненный цикл -------------------------------------------------------
 
@@ -127,6 +148,7 @@ class PaperAdapter:
                 bid=mid - spread,
                 ask=mid + spread,
                 last=mid,
+                volume=round(bar.volume * 1440, 4),  # «24h-объём» синтетики (R9 Risk Gate)
             )
         self._last_price[symbol] = tick.last if tick.last is not None else (tick.bid + tick.ask) / 2
         return tick
@@ -139,12 +161,16 @@ class PaperAdapter:
         if existing is not None:
             return existing
         tick = await self.get_latest(req.symbol)
-        price = tick.ask if req.side == "BUY" else tick.bid
+        ref = tick.ask if req.side == "BUY" else tick.bid
+        price = self._costs.fill_price(req.side, ref).quantize(_PRICE_Q)
         signed = req.qty if req.side == "BUY" else -req.qty
         cost = (price * signed).quantize(_PRICE_Q)
-        if req.side == "BUY" and cost > self._cash:
-            raise RejectedError(f"insufficient funds: need {cost}, have {self._cash}")
+        fee = self._costs.fee(cost).quantize(_PRICE_Q)
         qty, avg = self._positions.get(req.symbol, (Decimal(0), Decimal(0)))
+        if req.reduce_only and (qty == 0 or (qty > 0) == (signed > 0) or abs(signed) > abs(qty)):
+            raise RejectedError(f"reduce_only would increase position: {qty} {req.side} {req.qty}")
+        if req.side == "BUY" and cost + fee > self._cash:
+            raise RejectedError(f"insufficient funds: need {cost + fee}, have {self._cash}")
         new_qty = qty + signed
         if new_qty == 0:
             self._positions.pop(req.symbol, None)
@@ -156,13 +182,25 @@ class PaperAdapter:
             else:
                 new_avg = price  # переворот: остаток открыт по текущей цене
             self._positions[req.symbol] = (new_qty, new_avg.quantize(_PRICE_Q))
-        self._cash -= cost
+        self._cash -= cost + fee
+        venue_order_id = f"paper-{len(self._orders) + 1}"
         ack = OrderAck(
             client_order_id=req.client_order_id,
-            venue_order_id=f"paper-{len(self._orders) + 1}",
+            venue_order_id=venue_order_id,
             state=OrderState.FILLED,
             filled_qty=req.qty,
             avg_price=price,
+            fee=fee,
+            fee_ccy=self._currency,
+            fills=[
+                VenueFill(
+                    venue_fill_id=f"{venue_order_id}-1",
+                    qty=req.qty,
+                    price=price,
+                    fee=fee,
+                    ts=tick.ts,
+                )
+            ],
             raw={"venue": self.venue, "ts": tick.ts},
         )
         self._orders[req.client_order_id] = ack

@@ -9,6 +9,7 @@
   `fill_on="next_open"` — по open следующего бара (ARCHITECTURE.md §6.3).
 - Проскальзывание: покупка по `price × (1 + s)`, продажа по `price × (1 − s)`.
   Комиссия: `notional × c`, вычитается из cash. `s`, `c` задаются в процентах.
+  Модель общая с PaperAdapter — `augur.backtest.costs.CostModel` (0.6.0).
 - Одна позиция: на весь доступный капитал. BUY открывает long, SELL — short, только из
   flat; противоположный сигнал при открытой позиции игнорируется (long и short не
   смешиваются, переворота нет — сначала CLOSE). REDUCE закрывает половину позиции.
@@ -21,6 +22,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from augur.backtest.costs import CostModel
 from augur.backtest.metrics import compute_metrics
 from augur.data.models import Bar, timeframe_ms
 from augur.strategies.base import Signal, SignalAction, Strategy
@@ -116,8 +118,8 @@ class Backtester:
         if fill_on not in ("close", "next_open"):
             raise ValueError(f"unsupported fill_on: {fill_on!r}")
 
-        self._c = commission_pct / 100.0
-        self._s = slippage_pct / 100.0
+        self._costs = CostModel.from_floats(commission_pct, slippage_pct)
+        self._c = self._costs.commission_rate
         self._cash = float(initial_cash)
         self._pos: _Position | None = None
         self._trades: list[Trade] = []
@@ -184,12 +186,12 @@ class Backtester:
         # HOLD / NO_SIGNAL — ничего
 
     def _open(self, side: Side, price: float, ts: int) -> None:
-        fill = price * (1 + self._s) if side == "LONG" else price * (1 - self._s)
+        fill = self._costs.fill_price_f("BUY" if side == "LONG" else "SELL", price)
         qty = self._cash / (fill * (1 + self._c))
         if qty <= 0:
             return
         notional = qty * fill
-        commission = notional * self._c
+        commission = self._costs.fee_f(notional)
         if side == "LONG":
             self._cash -= notional + commission
         else:
@@ -201,9 +203,9 @@ class Backtester:
         if pos is None or qty <= 0:
             return
         qty = min(qty, pos.qty)
-        fill = price * (1 - self._s) if pos.side == "LONG" else price * (1 + self._s)
+        fill = self._costs.fill_price_f("SELL" if pos.side == "LONG" else "BUY", price)
         notional = qty * fill
-        exit_commission = notional * self._c
+        exit_commission = self._costs.fee_f(notional)
         share = qty / pos.qty
         entry_commission = pos.entry_commission * share
         if pos.side == "LONG":

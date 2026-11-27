@@ -18,10 +18,11 @@ from augur.adapters.base import (
     OrderState,
     RejectedError,
     RetryableError,
+    VenueFill,
     VenuePosition,
 )
 from augur.adapters.paper import PaperAdapter
-from augur.adapters.resilient import CallPolicy, call_with_retry
+from augur.adapters.resilient import CallPolicy, ResilientAdapter, call_with_retry
 
 __all__ = [
     "AccountState",
@@ -37,7 +38,9 @@ __all__ = [
     "OrderState",
     "PaperAdapter",
     "RejectedError",
+    "ResilientAdapter",
     "RetryableError",
+    "VenueFill",
     "VenuePosition",
     "call_with_retry",
 ]

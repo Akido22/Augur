@@ -48,7 +48,8 @@ ruff format .               # форматирование
 mypy src                    # типы
 augur --version             # версия приложения
 augur backtest              # бэктест стратегии (заглушка до соответствующего этапа)
-augur kill-switch           # аварийная остановка торговли (заглушка до этапа Risk Gate)
+augur kill-switch           # аварийная остановка: KILLED, ANALYSIS_ONLY, отмена ордеров, flatten
+augur cb status | cb reset --confirm   # состояние CB; сброс по одноразовому коду → PAPER
 ```
 
 Перед коммитом: `ruff check .` и `pytest` должны проходить.

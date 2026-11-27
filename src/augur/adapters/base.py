@@ -51,8 +51,24 @@ class OrderRequest(BaseModel):
     take_profit: Decimal | None = None
 
 
+class VenueFill(BaseModel):
+    """Одно исполнение на площадке. `venue_fill_id` уникален в пределах ордера (дедуп fills)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    venue_fill_id: str
+    qty: Decimal = Field(gt=0)
+    price: Decimal = Field(gt=0)
+    fee: Decimal = Decimal(0)
+    ts: int  # Unix ms UTC
+
+
 class OrderAck(BaseModel):
-    """Ответ площадки на операцию с ордером."""
+    """Ответ площадки на операцию с ордером.
+
+    `fills` — все известные исполнения ордера (кумулятивно, не дельта). Если площадка их
+    не отдаёт, Execution восстанавливает дельту по `filled_qty` / `avg_price`.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -61,6 +77,10 @@ class OrderAck(BaseModel):
     state: OrderState
     filled_qty: Decimal = Decimal(0)
     avg_price: Decimal | None = None
+    fee: Decimal = Decimal(0)  # суммарная комиссия по ордеру
+    fee_ccy: str | None = None
+    fills: list[VenueFill] = Field(default_factory=list)
+    reject_reason: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)  # сырой ответ (без секретов) для аудита
 
 

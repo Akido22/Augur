@@ -1,19 +1,31 @@
 """Точка входа CLI `augur` (pyproject: `augur.interfaces.cli.main:app`)."""
 
 import asyncio
+import getpass
 import math
+import sqlite3
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import typer
+from pydantic import ValidationError
 
 from augur import __version__
 from augur.adapters.paper import PaperAdapter
 from augur.backtest import Backtester, BacktestResult
-from augur.config.settings import Settings
+from augur.config.settings import Settings, TradingMode, load_settings
 from augur.data.models import Bar
 from augur.db.migrator import MigrationError, Migrator
+from augur.execution import (
+    CircuitBreaker,
+    InvalidResetCodeError,
+    KillSwitch,
+    ModeStore,
+    OrderRepository,
+    build_paper_stack,
+)
 from augur.strategies import (
     StrategyParamsError,
     UnknownStrategyError,
@@ -27,6 +39,10 @@ db_app = typer.Typer(help="Схема SQLite: миграции и бэкапы."
 app.add_typer(db_app, name="db")
 strategies_app = typer.Typer(help="Стратегии: реестр и параметры.", no_args_is_help=True)
 app.add_typer(strategies_app, name="strategies")
+cb_app = typer.Typer(help="Circuit breaker: состояние и сброс.", no_args_is_help=True)
+app.add_typer(cb_app, name="cb")
+orders_app = typer.Typer(help="Ордера (только чтение).", no_args_is_help=True)
+app.add_typer(orders_app, name="orders")
 
 # Значение по умолчанию берём из модели Settings без загрузки .env:
 # командам БД не нужны секреты (api_auth_token и пр.).
@@ -244,3 +260,166 @@ def backtest(
         f"costs:             commission {commission}% | slippage {slippage}% | fill {fill_on}"
     )
     _print_result(result, cash)
+
+
+# --- исполнение: kill switch, circuit breaker, ордера (0.6.0) ---------------------
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _actor() -> str:
+    try:
+        return f"cli:{getpass.getuser()}"
+    except Exception:  # noqa: BLE001 — имя пользователя не критично
+        return "cli:unknown"
+
+
+def _open_db(db: str) -> sqlite3.Connection:
+    """Соединение с БД, где применены все миграции кода; иначе — понятная ошибка."""
+    if not Path(db).is_file():
+        typer.echo(f"ERROR: database not found: {db} (run: augur db migrate)", err=True)
+        raise typer.Exit(code=1)
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
+    try:
+        row = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+    except sqlite3.Error:
+        row = None
+    if row is None or row[0] is None or int(row[0]) < DB_SCHEMA_VERSION:
+        conn.close()
+        typer.echo(
+            f"ERROR: schema older than {DB_SCHEMA_VERSION} (run: augur db migrate)", err=True
+        )
+        raise typer.Exit(code=1)
+    return conn
+
+
+def _try_settings() -> Settings | None:
+    try:
+        return load_settings()
+    except ValidationError:
+        return None
+
+
+@app.command("kill-switch")
+def kill_switch(
+    flatten: bool = typer.Option(
+        True, "--flatten/--no-flatten", help="Закрыть позиции рыночными reduce_only-ордерами."
+    ),
+    db: str = DbOption,
+) -> None:
+    """Аварийная остановка: KILLED, режим ANALYSIS_ONLY, отмена ордеров, закрытие позиций.
+
+    Без кода подтверждения (ARCH §7.4). Снятие — `augur cb reset --confirm`.
+    """
+    conn = _open_db(db)
+    try:
+        settings = _try_settings()
+        if settings is not None and settings.trading_mode == TradingMode.PAPER:
+            stack = build_paper_stack(conn, settings, app_version=__version__, clock=_now_ms)
+            switch = stack.kill_switch
+        else:
+            reason = "settings not loaded" if settings is None else f"mode {settings.trading_mode}"
+            typer.echo(f"WARNING: {reason}: state/mode only, orders not cancelled", err=True)
+            configured = settings.trading_mode if settings is not None else TradingMode.PAPER
+            switch = KillSwitch(
+                conn,
+                orders=None,
+                modes=ModeStore(conn, configured_mode=configured),
+                clock=_now_ms,
+            )
+        report = asyncio.run(switch.engage(actor=_actor(), flatten=flatten))
+    finally:
+        conn.close()
+    typer.echo(f"KILL SWITCH ENGAGED (was {report.was_state}) -> KILLED, mode ANALYSIS_ONLY")
+    typer.echo(f"cancelled orders: {report.cancelled}")
+    if flatten:
+        typer.echo(f"flatten orders:   {len(report.flatten_orders)}")
+    typer.echo("release: augur cb reset --confirm")
+
+
+def _breaker(conn: sqlite3.Connection) -> CircuitBreaker:
+    settings = _try_settings()
+    base = settings or Settings.model_construct()
+    configured = settings.trading_mode if settings is not None else TradingMode.PAPER
+    return CircuitBreaker(
+        conn,
+        orders=None,
+        modes=ModeStore(conn, configured_mode=configured),
+        limits=base.risk,
+        cb=base.cb,
+        fusion=base.fusion,
+        clock=_now_ms,
+    )
+
+
+@cb_app.command("status")
+def cb_status(db: str = DbOption) -> None:
+    """Состояние circuit breaker и текущий режим."""
+    conn = _open_db(db)
+    try:
+        st = _breaker(conn).status()
+        mode = ModeStore(conn, configured_mode=TradingMode.FULL_AUTO).stored()
+    finally:
+        conn.close()
+    typer.echo(f"state:      {st.state}")
+    typer.echo(f"reason:     {st.reason or '-'}")
+    typer.echo(f"tripped_at: {_fmt_ts(st.tripped_ts)}")
+    typer.echo(f"reset_by:   {st.reset_by or '-'} at {_fmt_ts(st.reset_ts)}")
+    typer.echo(f"mode:       {mode.value if mode else '-'}")
+
+
+@cb_app.command("reset")
+def cb_reset(
+    confirm: bool = typer.Option(False, "--confirm", help="Обязательно: подтверждение сброса."),
+    db: str = DbOption,
+) -> None:
+    """Сбросить CB/kill switch в ARMED по одноразовому коду; режим после сброса — PAPER."""
+    if not confirm:
+        typer.echo("ERROR: --confirm is required", err=True)
+        raise typer.Exit(code=2)
+    conn = _open_db(db)
+    try:
+        breaker = _breaker(conn)
+        if breaker.state == "ARMED":
+            typer.echo("circuit breaker is already ARMED")
+            return
+        ticket = breaker.issue_reset_code()
+        typer.echo(f"state {breaker.state}: {breaker.status().reason or '-'}")
+        typer.echo(f"confirmation code: {ticket.code} (valid until {_fmt_ts(ticket.expires_ts)})")
+        code = typer.prompt("enter the code to reset")
+        try:
+            st = breaker.reset(actor=_actor(), confirm_code=code.strip())
+        except InvalidResetCodeError as e:
+            typer.echo(f"ERROR: {e}", err=True)
+            raise typer.Exit(code=1) from e
+    finally:
+        conn.close()
+    typer.echo(f"circuit breaker {st.state}; mode PAPER (escalation: augur mode set, 0.7.0)")
+
+
+@orders_app.command("list")
+def orders_list(
+    limit: int = typer.Option(20, "--limit", min=1, help="Сколько последних ордеров."),
+    state: str | None = typer.Option(None, "--state", help="Фильтр по состоянию."),
+    db: str = DbOption,
+) -> None:
+    """Последние ордера: время, состояние, сторона, объём, исполнение."""
+    conn = _open_db(db)
+    try:
+        rows = OrderRepository(conn).recent(limit=limit, state=state.upper() if state else None)
+    finally:
+        conn.close()
+    typer.echo(
+        f"{'created':<23} {'id':<26} {'state':<9} {'mode':<6} {'symbol':<10} {'side':<4} "
+        f"{'qty':>14} {'filled':>14} {'avg':>14}"
+    )
+    for o in rows:
+        typer.echo(
+            f"{_fmt_ts(o.created_ts):<23} {o.id:<26} {o.state.value:<9} {o.mode:<6} "
+            f"{o.symbol:<10} {o.side:<4} {o.qty:>14} {o.filled_qty:>14} "
+            f"{o.avg_fill_price if o.avg_fill_price is not None else '-':>14}"
+        )

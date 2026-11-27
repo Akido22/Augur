@@ -70,9 +70,9 @@
 
 ```python
 # src/augur/versions.py
-DB_SCHEMA_VERSION: int = 3   # схема, которую ожидает этот код (= последний файл миграции)
+DB_SCHEMA_VERSION: int = 4   # схема, которую ожидает этот код (= последний файл миграции)
 API_VERSION: str = "1.0"     # контракт Fusion (fused_signal), который реализует этот код
-CONFIG_VERSION: int = 1      # формат конфига, который читает этот код
+CONFIG_VERSION: int = 2      # формат конфига, который читает этот код
 
 __all__ = ["DB_SCHEMA_VERSION", "API_VERSION", "CONFIG_VERSION"]
 ```

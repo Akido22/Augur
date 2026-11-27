@@ -922,7 +922,8 @@ Alpaca нативно поддерживает `client_order_id` — этало�
         "action":             {"enum": ["BUY", "SELL", "CLOSE", "REDUCE", "HOLD", "NO_SIGNAL"]},
         "strength":           {"type": "number", "minimum": 0, "maximum": 1},
         "params_hash":        {"type": "string", "description": "sha256 канонического JSON параметров стратегии"},
-        "data_hash":          {"type": "string", "description": "sha256 окна последних warmup_bars баров"}
+        "data_hash":          {"type": "string", "description": "sha256 окна последних warmup_bars баров"},
+        "decision_audit_id":  {"type": "string", "description": "ULID записи decision_audit, заранее выданный Signal Engine (0.5.0+); Fusion возвращает его в explanation_ref = \"decision_audit:<ulid>\" (FUSION SPEC §4.6)"}
       }
     }
   }

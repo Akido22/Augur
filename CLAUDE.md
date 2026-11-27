@@ -70,8 +70,7 @@ augur gui [--host 127.0.0.1] [--port 8000]   # GUI мониторинга + REST
 | `llm-output-validation` | клиенты LLM, промпты, Pydantic-схемы ответов, запись в `llm_calls` |
 | `auto-trade-risk-gate` | лимиты, размер позиции, kill-switch, проверки перед Execution |
 | `release-management` | bump версии, CHANGELOG, annotated tag |
-
-Для ML-обучения и инференса отдельный skill будет создан перед 0.10.0.
+| `ml-training-inference` | признаки, разметка, walk-forward, обучение, калибровка, реестр моделей, ML-инференс (`augur.fusion.ml`) |
 
 Если нужного skill нет в `.claude/skills/` — остановись и сообщи, не пиши код «по памяти».
 

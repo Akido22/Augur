@@ -1587,7 +1587,7 @@ augur/
     └── e2e/           # сценарии: CB trip, kill switch, duplicate signal, reconnect
 ```
 
-> `src/augur/fusion/` — **тонкий интерфейсный модуль**: только контракт `FusedSignal`/`FusionRequest`, `FusionClient` Protocol, `HttpFusionClient` и `StubFusionClient`. Реализация — по `ML_LLM_FUSION_SPEC.md` (отдельный сервис/пакет).
+> `src/augur/fusion/` — **тонкий интерфейсный модуль**: только контракт `FusedSignal`/`FusionRequest`, `FusionClient` Protocol, `HttpFusionClient` и `StubFusionClient`. Реализация — по `ML_LLM_FUSION_SPEC.md` в подпакетах `augur.fusion` (с 0.10.0): ML-слой — `augur.fusion.ml` (skill `ml-training-inference`). Подпакеты подчиняются тому же контракту «Fusion cannot reach execution»; ML/LLM-библиотеки импортируются только внутри `augur.fusion`.
 
 Контракты `import-linter` (фрагмент):
 
@@ -1662,8 +1662,7 @@ augur kill-switch           # аварийная остановка торгов
 | `llm-output-validation` | клиенты LLM, промпты, Pydantic-схемы ответов, запись в `llm_calls` |
 | `auto-trade-risk-gate` | лимиты, размер позиции, kill-switch, проверки перед Execution |
 | `release-management` | bump версии, CHANGELOG, annotated tag |
-
-Для ML-обучения и инференса отдельный skill будет создан перед 0.10.0.
+| `ml-training-inference` | признаки, разметка, walk-forward, обучение, калибровка, реестр моделей, ML-инференс (`augur.fusion.ml`) |
 
 Если нужного skill нет в `.claude/skills/` — остановись и сообщи, не пиши код «по памяти».
 ````
@@ -1764,7 +1763,8 @@ description: Use BEFORE creating or changing anything in src/augur/risk or src/a
 | Задача агента | Обязательные skills |
 |---|---|
 | Любые изменения в `risk/`, `execution/`, режимах, CB, kill switch | `auto-trade-risk-gate` |
-| Fusion-реализация (отдельный пакет) | `hybrid-ml-llm-fusion`, `llm-output-validation` `[→ FUSION SPEC]` |
+| Fusion-реализация (подпакеты `augur.fusion`) | `hybrid-ml-llm-fusion`, `llm-output-validation` `[→ FUSION SPEC]` |
+| ML-слой `augur.fusion.ml`: признаки, обучение, реестр, инференс | `ml-training-inference` `[→ FUSION SPEC §2]` |
 | Контракт `src/augur/fusion/contract.py` | `auto-trade-risk-gate` (раздел про ужесточение) + сверка с `ML_LLM_FUSION_SPEC.md` |
 | Стратегии | `exit-strategies` |
 | Бэктест/издержки | `slippage-modeling`, `trade-journal` |

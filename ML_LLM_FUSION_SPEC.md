@@ -89,13 +89,15 @@ def purged_walk_forward(n: int, train: int, test: int, horizon: int,
 
 Инференс выполняется **только** по модели из registry в статусе `production`. Загрузка артефакта по пути «в обход» registry запрещена. Жизненный цикл статусов: `candidate → staging (shadow) → production → retired`.
 
+**Версия модели (решение 0.10.0).** `ml_model_version` имеет формат `lightgbm_v<N>` (`VERSIONING.md` §2.3), `N` растёт монотонно. Эта строка пишется в `ml_models.version`, в `artifacts` (`kind = 'ml_model'`, с `sha256`) и в `decision_audit.ml_model_version`. `ml_models` хранит жизненный цикл (`name`, `status`, `approved_by`, метрики), `artifacts` — неизменяемый артефакт и хэш. Git sha кода обучения и версии библиотек хранятся в метаданных артефакта, а не в строке версии. Пути артефактов — `artifacts/ml/lightgbm_v<N>/`. Объём 0.10.0 — только классификатор §2.1 с правилами для `regime_tag`; квантили, волатильность, HMM и последовательностные модели — после 0.10.0. Правила — skill `ml-training-inference`.
+
 ```python
 @dataclass(frozen=True)
 class ModelRecord:
     id: int
     name: str                 # "signal_clf_btcusdt_15m"
-    version: str              # semver + git sha: "1.4.0+a1b2c3d"
-    artifact_path: str        # models/signal_clf/1.4.0/model.lgb
+    version: str              # "lightgbm_v3" (VERSIONING §2.3)
+    artifact_path: str        # artifacts/ml/lightgbm_v3/
     artifact_sha256: str
     feature_set_version: str
     trained_at: int           # ms UTC
@@ -158,7 +160,7 @@ class ModelRegistry(Protocol):
   "expected_return_q50": 0.0041,
   "vol_forecast": 0.0093,
   "regime_tag": "trend_up",
-  "model_version": "signal_clf_btcusdt_15m:1.4.0+a1b2c3d",
+  "model_version": "lightgbm_v3",
   "feature_set_version": "fs_9c41e07d2b1a",
   "input_hash": "sha256:7e3a…"
 }
@@ -602,7 +604,7 @@ def fuse(ml: MLPrediction | None, llm: LLMContextResult | None,
   "reason": "below_entry_threshold",
   "source_breakdown": {
     "ml":   {"direction": "long", "confidence": 0.62, "score": 0.1556, "weight": 0.5,
-             "model_version": "signal_clf_btcusdt_15m:1.4.0+a1b2c3d"},
+             "model_version": "lightgbm_v3"},
     "tech": {"score": 0.40, "weight": 0.3},
     "llm":  {"context_score": -0.10, "confidence": 0.6, "score": -0.06, "weight": 0.2,
              "llm_call_ids": [99120, 99121, 99122]},

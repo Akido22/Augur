@@ -11,6 +11,16 @@
 
 Блоки 0.9.0, 0.8.0 и 0.7.0 идут отдельно: ни один ещё не выпущен.
 
+### Документация — подготовка 0.10.0
+
+- Skill `ml-training-inference` (`.claude/skills/`): общая `compute_features` без look-ahead,
+  triple-barrier, purged walk-forward с embargo, калиброванный LightGBM multiclass, `regime_tag`
+  по правилам, реестр (`ml_models` + `artifacts`), артефакты без pickle, детерминированный
+  инференс, `ml_predictions` с `input_hash`.
+- Решения по расхождениям спецификаций: `ml_model_version` = `lightgbm_v<N>` (VERSIONING §2.3) в
+  `ml_models`, `artifacts` и `decision_audit`; ML-код — `augur.fusion.ml` (ARCHITECTURE.md §13);
+  объём ML в 0.10.0 — классификатор + правила режима (ML_LLM_FUSION_SPEC.md §2.4).
+
 ### Добавлено — 0.9.0
 
 - GUI мониторинга (ARCHITECTURE.md §9.1, §14 этап 9): `augur gui [--host 127.0.0.1] [--port 8000]

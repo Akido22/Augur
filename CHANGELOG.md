@@ -7,15 +7,23 @@
 
 ## [Unreleased]
 
-**Компоненты (готовится 0.12.0 — хвосты ML+LLM):** db_schema_version 8 (без изменений: состояние Fusion-breaker и отчёты nightly — в `audit_log`, `realized_return` уже был в `ml_predictions`) · api_version 1.0 (без изменений: контракт `fused_signal` не менялся, HTTP-контракт Fusion несёт его как есть) · config_version 7 → 8 · `ml_model_version` / `llm_prompt_version` без изменений (`prompt_context_v1`: шаблон тот же, в `<macro>` теперь приходят события) · зависимость `pyyaml>=6` объявлена явно (уже стояла транзитивно через `uvicorn[standard]`)
+## [0.12.0] - 2026-11-28
 
-**Компоненты (готовится 0.11.0 — FULL_AUTO):** db_schema_version 7 → 8 (`0008_notify`, expand) · api_version 1.0 (без изменений) · config_version 6 → 7 · `llm_prompt_version` + `prompt_explain_v1` · новых зависимостей нет (Telegram — через уже подключённый `httpx`)
+**Компоненты:** db_schema_version 5 → 8 (`0006_news`, `0007_ml_llm`, `0008_notify`; все expand) · api_version 1.0 (без изменений) · config_version 3 → 8 · `ml_model_version` `lightgbm_v<N>` · `llm_prompt_version` `prompt_context_v1`, `prompt_news_v1`, `prompt_explain_v1` · метод скоринга новостей `rule:v1` · новые зависимости `jinja2>=3.1`, `pyyaml>=6`; extra `ml` = `lightgbm>=4`, `numpy>=1.26`; dev: `hypothesis`
 
-**Компоненты (готовится 0.10.0 — ML+LLM):** db_schema_version 7 (`0007_ml_llm`) · api_version 1.0 (без изменений: схема `fused_signal` не менялась, `source_breakdown.ml/llm` — объекты, что §4.6 допускает) · config_version 6 · `ml_model_version` `lightgbm_v<N>` · `llm_prompt_version` `prompt_context_v1`, `prompt_news_v1` · extra `ml` = `lightgbm>=4`, `numpy>=1.26` (убраны `scikit-learn`, `pandas`) · dev: `hypothesis`
+Сводный релиз этапов 0.7.0–0.12.0 (VERSIONING.md §4): отдельные релизы 0.7.0–0.11.0 не выпускались и тегов не имеют, их изменения описаны блоками ниже. Миграции только expand: откат на v0.6.0 — по §8.3, шаг 4а.
 
-**Компоненты (готовится 0.9.0 — GUI/CLI):** db_schema_version 6 (без изменений) · api_version 1.0 (без изменений) · config_version 5 (без изменений) · новая зависимость `jinja2>=3.1`
+**Не проверено:** прогон MICRO_LIVE и FULL_AUTO на реальном счёте и репетиция отката на копии боевой БД (VERSIONING.md §1.3, п. 2 и 5). Режим по умолчанию — `PAPER`; реальная торговля включается только явной конфигурацией.
 
-Блоки 0.12.0, 0.11.0, 0.10.0, 0.9.0, 0.8.0 и 0.7.0 идут отдельно: ни один ещё не выпущен.
+**Компоненты (этап 0.12.0 — хвосты ML+LLM):** db_schema_version 8 (без изменений: состояние Fusion-breaker и отчёты nightly — в `audit_log`, `realized_return` уже был в `ml_predictions`) · api_version 1.0 (без изменений: контракт `fused_signal` не менялся, HTTP-контракт Fusion несёт его как есть) · config_version 7 → 8 · `ml_model_version` / `llm_prompt_version` без изменений (`prompt_context_v1`: шаблон тот же, в `<macro>` теперь приходят события) · зависимость `pyyaml>=6` объявлена явно (уже стояла транзитивно через `uvicorn[standard]`)
+
+**Компоненты (этап 0.11.0 — FULL_AUTO):** db_schema_version 7 → 8 (`0008_notify`, expand) · api_version 1.0 (без изменений) · config_version 6 → 7 · `llm_prompt_version` + `prompt_explain_v1` · новых зависимостей нет (Telegram — через уже подключённый `httpx`)
+
+**Компоненты (этап 0.10.0 — ML+LLM):** db_schema_version 7 (`0007_ml_llm`) · api_version 1.0 (без изменений: схема `fused_signal` не менялась, `source_breakdown.ml/llm` — объекты, что §4.6 допускает) · config_version 6 · `ml_model_version` `lightgbm_v<N>` · `llm_prompt_version` `prompt_context_v1`, `prompt_news_v1` · extra `ml` = `lightgbm>=4`, `numpy>=1.26` (убраны `scikit-learn`, `pandas`) · dev: `hypothesis`
+
+**Компоненты (этап 0.9.0 — GUI/CLI):** db_schema_version 6 (без изменений) · api_version 1.0 (без изменений) · config_version 5 (без изменений) · новая зависимость `jinja2>=3.1`
+
+Ниже — блоки этапов 0.12.0, 0.11.0, 0.10.0, 0.9.0, 0.8.0 и 0.7.0.
 
 ### Добавлено — 0.12.0
 
@@ -297,7 +305,7 @@
 - `[ДОПУЩЕНИЕ]` `position_update` ловится по росту `positions.updated_ts`: два обновления с
   одинаковым ts между опросами дадут одно событие (GUI всё равно перечитывает позиции).
 
-**Компоненты (готовится 0.8.0 — News):** db_schema_version 5 → 6 · api_version 1.0 (без изменений) · config_version 4 → 5 · метод скоринга `rule:v1` (без LLM, `llm_prompt_version` не появляется)
+**Компоненты (этап 0.8.0 — News):** db_schema_version 5 → 6 · api_version 1.0 (без изменений) · config_version 4 → 5 · метод скоринга `rule:v1` (без LLM, `llm_prompt_version` не появляется)
 
 Блок 0.8.0 идёт отдельно от 0.7.0: 0.7.0 ещё не выпущен. При релизе 0.7.0 его блок ниже станет
 `[0.7.0]`, а блоки 0.8.0 и 0.9.0 останутся в `[Unreleased]`.
@@ -354,7 +362,7 @@
 - `[ДОПУЩЕНИЕ]` Словарь `rule:v1` и пороги правил — стартовые; подобрать на истории новостей.
 - Проверено на копии рабочей БД: миграция 3 → 6 проходит.
 
-**Компоненты (готовится 0.7.0 — MICRO_LIVE):** db_schema_version 5 (без изменений) · api_version 1.0 (без изменений) · config_version 3 → 4
+**Компоненты (этап 0.7.0 — MICRO_LIVE):** db_schema_version 5 (без изменений) · api_version 1.0 (без изменений) · config_version 3 → 4
 
 ### Добавлено
 
@@ -420,7 +428,7 @@
 - `ccxt_venue_quirks.py` (ARCH §4.4) не реализован: используется унифицированный
   `clientOrderId`, проверить на testnet конкретной биржи.
 - Не сделано: прогон на реальном счёте (выполняет человек по runbook) и репетиция отката на
-  копии боевой БД (VERSIONING §1.3, п. 5) — оба нужны до релиза 0.7.0.
+  копии боевой БД (VERSIONING §1.3, п. 5) — не выполнены к релизу 0.12.0 (см. «Не проверено» выше).
 
 ## [0.6.0] - 2026-11-27
 

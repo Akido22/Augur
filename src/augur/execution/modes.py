@@ -7,8 +7,9 @@
 1) цель ≤ `settings.trading_mode` и ≤ `settings.max_allowed_mode`;
 2) ровно один шаг вверх `ANALYSIS_ONLY → SIGNAL_ONLY → PAPER → MICRO_LIVE → FULL_AUTO`;
 3) CB в ARMED (не TRIPPED/KILLED);
-4) для FULL_AUTO — promotion: в текущем пребывании в MICRO_LIVE исполнено не менее
-   `mode.min_micro_trades` ордеров и CB не срабатывал;
+4) для FULL_AUTO — promotion (`augur.execution.promotion`, 0.11.0): сделки MICRO_LIVE без CB,
+   сверка исполнения с CostModel, нет активных ордеров, настроены алерты; утверждающий
+   (`approved_by`) обязателен и пишется в аудит;
 5) для MICRO_LIVE — preflight (сверка позиций с реальной площадкой), если он передан.
 `request_change` выдаёт тикет с одноразовым 6-значным кодом (TTL `mode.code_ttl_s`, только в
 памяти процесса) и пишет `MODE_CHANGE_REQUESTED`. `confirm_change` повторно проверяет
@@ -17,16 +18,25 @@
 
 Каждая смена — `mode_state` + `audit_log: MODE_CHANGED` в одной транзакции. Вход в режим
 сбрасывает `micro_first_order_confirmed` (первый ордер MICRO_LIVE снова ждёт подтверждения).
+
+Книга реального счёта (0.11.0). Позиции и снимки портфеля ключуются режимом. MICRO_LIVE и
+FULL_AUTO торгуют на одном субсчёте, поэтому переход между ними (в любую сторону) переносит
+открытые позиции и последний снимок портфеля в книгу нового режима той же транзакцией, что и
+`MODE_CHANGED`; при активных ордерах в исходной книге переход запрещён. После CB / kill switch
+(режим ниже MICRO_LIVE) книга остаётся у последнего live-режима: её находит `live_book_mode`.
 """
 
 import secrets
 import sqlite3
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
 
 from augur.config.settings import Settings, TradingMode
 from augur.db.audit import append_audit
+from augur.execution.promotion import PromotionStatus, promotion_status
+from augur.execution.state_machine import TERMINAL_STATES
 from augur.ids import new_ulid
 from augur.risk.context import MODE_ORDER
 
@@ -37,10 +47,40 @@ __all__ = [
     "ModeController",
     "ModeStore",
     "PromotionStatus",
+    "has_live_book",
+    "live_book_mode",
     "mode_rank",
 ]
 
 CODE_REQUIRED = frozenset({TradingMode.MICRO_LIVE, TradingMode.FULL_AUTO})
+LIVE_MODES = (TradingMode.MICRO_LIVE, TradingMode.FULL_AUTO)
+_TERMINAL = tuple(s.value for s in TERMINAL_STATES)
+
+
+def _active_orders(conn: sqlite3.Connection, mode: TradingMode) -> int:
+    ph = ",".join("?" * len(_TERMINAL))
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM orders WHERE mode = ? AND state NOT IN ({ph})",  # noqa: S608
+        (mode.value, *_TERMINAL),
+    ).fetchone()
+    return int(row[0])
+
+
+def has_live_book(conn: sqlite3.Connection, mode: TradingMode) -> bool:
+    """В книге режима есть открытые позиции или активные ордера."""
+    rows = conn.execute("SELECT qty FROM positions WHERE mode = ?", (mode.value,)).fetchall()
+    return any(Decimal(str(r[0])) != 0 for r in rows) or _active_orders(conn, mode) > 0
+
+
+def live_book_mode(conn: sqlite3.Connection, current: TradingMode) -> TradingMode:
+    """Режим-книга реального счёта: текущий live-режим; ниже MICRO_LIVE — книга с позициями
+    или активными ордерами (FULL_AUTO приоритетнее); пусто — MICRO_LIVE."""
+    if current in LIVE_MODES:
+        return current
+    for mode in (TradingMode.FULL_AUTO, TradingMode.MICRO_LIVE):
+        if has_live_book(conn, mode):
+            return mode
+    return TradingMode.MICRO_LIVE
 
 
 def mode_rank(mode: TradingMode) -> int:
@@ -110,6 +150,9 @@ class ModeStore:
         before = before if before is not None else self.current()
         if self.stored() == target:
             return False
+        extra = dict(extra or {})
+        if {before, target} == set(LIVE_MODES):
+            extra["book_transfer"] = self._transfer_book(before, target, ts)
         self._conn.execute(
             "INSERT INTO mode_state(id, mode, changed_ts, changed_by, micro_first_order_confirmed) "
             "VALUES (1, ?, ?, ?, 0) ON CONFLICT(id) DO UPDATE SET mode = excluded.mode, "
@@ -124,10 +167,41 @@ class ModeStore:
             severity="WARN",
             ref_type="mode",
             ref_id=target.value,
-            payload={"from": before.value, "to": target.value, "reason": reason, **(extra or {})},
+            payload={"from": before.value, "to": target.value, "reason": reason, **extra},
             ts=ts,
         )
         return True
+
+    def _transfer_book(self, src: TradingMode, dst: TradingMode, ts: int) -> dict[str, object]:
+        """Перенести книгу реального счёта MICRO_LIVE ↔ FULL_AUTO (без COMMIT).
+
+        Raises:
+            ModeChangeError: в исходной книге активные ордера или в целевой открытые позиции.
+        """
+        active = _active_orders(self._conn, src)
+        if active:
+            raise ModeChangeError(
+                f"{active} active {src.value} orders: wait until they are terminal "
+                "(or downgrade to PAPER)"
+            )
+        if any(
+            Decimal(str(r[0])) != 0
+            for r in self._conn.execute("SELECT qty FROM positions WHERE mode = ?", (dst.value,))
+        ):
+            raise ModeChangeError(f"{dst.value} book already has open positions")
+        self._conn.execute("DELETE FROM positions WHERE mode = ?", (dst.value,))
+        moved = self._conn.execute(
+            "UPDATE positions SET mode = ? WHERE mode = ?", (dst.value, src.value)
+        ).rowcount
+        self._conn.execute(
+            "INSERT INTO portfolio_snapshots(ts, mode, equity, cash, margin_used, day_pnl, "
+            "peak_equity, drawdown_pct, positions_json) SELECT ?, ?, equity, cash, margin_used, "
+            "day_pnl, peak_equity, drawdown_pct, positions_json FROM portfolio_snapshots "
+            "WHERE mode = ? "
+            "ORDER BY ts DESC LIMIT 1 ON CONFLICT(mode, ts) DO NOTHING",
+            (ts, dst.value, src.value),
+        )
+        return {"from": src.value, "to": dst.value, "positions": int(moved)}
 
 
 class ModeChangeError(PermissionError):
@@ -147,18 +221,7 @@ class ModeChangeTicket(BaseModel):
     code: str  # 6 цифр; в аудит не пишется
     code_required: bool
     expires_ts: int
-
-
-class PromotionStatus(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    micro_trades: int
-    required: int
-    cb_tripped_since_entry: bool
-
-    @property
-    def ok(self) -> bool:
-        return self.micro_trades >= self.required and not self.cb_tripped_since_entry
+    approved_by: str | None = None  # FULL_AUTO: кто утвердил (ARCH §15 п. 1, один человек)
 
 
 Preflight = Callable[[TradingMode], Awaitable[None]]
@@ -212,25 +275,8 @@ class ModeController:
         return "ARMED" if row is None else str(row[0])
 
     def promotion_status(self) -> PromotionStatus:
-        """Promotion в FULL_AUTO: исполненные ордера MICRO_LIVE с момента входа в режим."""
-        required = self._settings.mode.min_micro_trades
-        row = self._conn.execute("SELECT mode, changed_ts FROM mode_state WHERE id = 1").fetchone()
-        if row is None or row[0] != TradingMode.MICRO_LIVE.value:
-            return PromotionStatus(micro_trades=0, required=required, cb_tripped_since_entry=False)
-        since = int(row[1])
-        trades = self._conn.execute(
-            "SELECT COUNT(*) FROM orders WHERE mode = 'MICRO_LIVE' AND state = 'FILLED' "
-            "AND created_ts >= ?",
-            (since,),
-        ).fetchone()[0]
-        tripped = self._conn.execute(
-            "SELECT 1 FROM audit_log WHERE event IN ('CB_TRIPPED', 'KILL_SWITCH') AND ts >= ? "
-            "LIMIT 1",
-            (since,),
-        ).fetchone()
-        return PromotionStatus(
-            micro_trades=int(trades), required=required, cb_tripped_since_entry=tripped is not None
-        )
+        """Критерии FULL_AUTO (`augur.execution.promotion`)."""
+        return promotion_status(self._conn, self._settings)
 
     def check_escalation(self, target: TradingMode) -> TradingMode:
         """Проверить условия повышения; вернуть текущий режим.
@@ -255,15 +301,20 @@ class ModeController:
         if target == TradingMode.FULL_AUTO:
             st = self.promotion_status()
             if not st.ok:
-                raise ModeChangeError(
-                    f"FULL_AUTO promotion not met: {st.micro_trades}/{st.required} MICRO_LIVE "
-                    f"trades, cb_tripped_since_entry={st.cb_tripped_since_entry}"
-                )
+                raise ModeChangeError("FULL_AUTO promotion not met: " + "; ".join(st.reasons()))
         return source
 
-    async def request_change(self, target: TradingMode, *, actor: str) -> ModeChangeTicket:
-        """Проверки + preflight → тикет с одноразовым кодом, `MODE_CHANGE_REQUESTED` (COMMIT)."""
+    async def request_change(
+        self, target: TradingMode, *, actor: str, approved_by: str | None = None
+    ) -> ModeChangeTicket:
+        """Проверки + preflight → тикет с одноразовым кодом, `MODE_CHANGE_REQUESTED` (COMMIT).
+
+        Для FULL_AUTO обязателен `approved_by` — имя утверждающего (пишется в аудит).
+        """
+        approver = (approved_by or "").strip() or None
         source = self.check_escalation(target)
+        if target == TradingMode.FULL_AUTO and approver is None:
+            raise ModeChangeError("FULL_AUTO requires approved_by (who approves the promotion)")
         if target == TradingMode.MICRO_LIVE and self._preflight is not None:
             await self._preflight(target)
         now = self._clock()
@@ -274,7 +325,11 @@ class ModeController:
             code=f"{secrets.randbelow(1_000_000):06d}",
             code_required=target in CODE_REQUIRED,
             expires_ts=now + self._settings.mode.code_ttl_s * 1000,
+            approved_by=approver,
         )
+        extra: dict[str, object] = {}
+        if target == TradingMode.FULL_AUTO:
+            extra = {"approved_by": approver, "promotion": self.promotion_status().summary()}
         self._commit(
             lambda: append_audit(
                 self._conn,
@@ -288,6 +343,7 @@ class ModeController:
                     "to": target.value,
                     "ticket_id": ticket.ticket_id,
                     "expires_ts": ticket.expires_ts,
+                    **extra,
                 },
                 ts=now,
             )
@@ -313,6 +369,11 @@ class ModeController:
         source = self.check_escalation(ticket.target)
         if source != ticket.source:
             raise ModeChangeError(f"mode changed since request: {ticket.source} -> {source}")
+        extra: dict[str, object] = {"ticket_id": ticket.ticket_id}
+        if ticket.approved_by is not None:
+            extra["approved_by"] = ticket.approved_by
+        if ticket.target == TradingMode.FULL_AUTO:
+            extra["promotion"] = self.promotion_status().summary()
         self._commit(
             lambda: self.store.write(
                 ticket.target,
@@ -320,7 +381,7 @@ class ModeController:
                 reason="mode set --confirm",
                 ts=now,
                 before=source,
-                extra={"ticket_id": ticket.ticket_id},
+                extra=extra,
             )
         )
         return self.current()

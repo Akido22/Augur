@@ -67,3 +67,15 @@ def test_core_modules_do_not_import_fusion_internals() -> None:
         if m.startswith(internals)
     ]
     assert bad == []
+
+
+def test_notify_is_a_leaf() -> None:
+    """Алерты (0.11.0) читают audit_log и шлют текст: без торговых, ML и LLM-модулей."""
+    allowed = ("augur.config", "augur.notify", "augur.db")
+    bad = [
+        (p.relative_to(SRC).as_posix(), m)
+        for p in _files("notify")
+        for m in _imports(p)
+        if m.startswith("augur") and not m.startswith(allowed)
+    ]
+    assert bad == []

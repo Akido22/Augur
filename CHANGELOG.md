@@ -7,11 +7,76 @@
 
 ## [Unreleased]
 
+**Компоненты (готовится 0.11.0 — FULL_AUTO):** db_schema_version 7 → 8 (`0008_notify`, expand) · api_version 1.0 (без изменений) · config_version 6 → 7 · `llm_prompt_version` + `prompt_explain_v1` · новых зависимостей нет (Telegram — через уже подключённый `httpx`)
+
 **Компоненты (готовится 0.10.0 — ML+LLM):** db_schema_version 7 (`0007_ml_llm`) · api_version 1.0 (без изменений: схема `fused_signal` не менялась, `source_breakdown.ml/llm` — объекты, что §4.6 допускает) · config_version 6 · `ml_model_version` `lightgbm_v<N>` · `llm_prompt_version` `prompt_context_v1`, `prompt_news_v1` · extra `ml` = `lightgbm>=4`, `numpy>=1.26` (убраны `scikit-learn`, `pandas`) · dev: `hypothesis`
 
 **Компоненты (готовится 0.9.0 — GUI/CLI):** db_schema_version 6 (без изменений) · api_version 1.0 (без изменений) · config_version 5 (без изменений) · новая зависимость `jinja2>=3.1`
 
-Блоки 0.10.0, 0.9.0, 0.8.0 и 0.7.0 идут отдельно: ни один ещё не выпущен.
+Блоки 0.11.0, 0.10.0, 0.9.0, 0.8.0 и 0.7.0 идут отдельно: ни один ещё не выпущен.
+
+### Добавлено — 0.11.0
+
+- FULL_AUTO: `OrderManager` и live-стек исполняют ордера автоматически в пределах Risk Gate, без
+  подтверждения первого ордера; путь тот же — вердикт → `decision_audit` (COMMIT) → ордер.
+- Promotion MICRO_LIVE → FULL_AUTO (`augur.execution.promotion`, ARCH §1.4, §15 п. 1, 10): сделки
+  MICRO_LIVE без CB/kill switch (`mode.min_micro_trades`); сверка исполнения с общей `CostModel`
+  бэктеста по close бара сигнала — не менее `mode.min_compared_orders` ордеров и средний перекос
+  (проскальзывание + комиссия) ≤ `mode.max_cost_excess_bps`, ордер без бара не засчитывается;
+  нет активных ордеров MICRO_LIVE; настроены алерты (`mode.require_alerts`). Утверждает один
+  человек: `augur mode set FULL_AUTO --approved-by <имя> --confirm` (код); `approved_by` и
+  сводка promotion пишутся в `MODE_CHANGE_REQUESTED` / `MODE_CHANGED`.
+- Книга реального счёта: переход MICRO_LIVE ↔ FULL_AUTO переносит открытые позиции и последний
+  снимок портфеля в книгу нового режима той же транзакцией (`book_transfer` в аудите), при
+  активных ордерах переход запрещён. `live_book_mode`: после CB / kill switch live-стек
+  (SL/TP, kill switch, сверка) работает с книгой, где остались позиции.
+- Алерты (`augur.notify`, ARCH §2.11): outbox по событиям `audit_log` → `notifications` →
+  Telegram Bot API на httpx; ретраи с backoff, `failed` после `notify.max_attempts`, `skipped`
+  без канала. CRITICAL: `CB_TRIPPED`, `KILL_SWITCH`, `RECONCILE_MISMATCH`, переход в FULL_AUTO,
+  `RUN_ERROR`, любое событие с severity ERROR/CRITICAL; WARN: смена режима, `CB_RESET`,
+  `ORDER_APPROVAL_REQUIRED`, `LLM_BREAKER_OPENED`, `ML_MODEL_UNAVAILABLE`, `NEWS_REACTION`,
+  `RUN_STOPPED`. Текст — простой, без разметки; токен не попадает в ошибки и БД.
+- Переходы LLM-breaker (FUSION SPEC §5.4) в аудите: `LLM_BREAKER_OPENED` / `LLM_BREAKER_CLOSED`
+  по задаче (`augur.fusion.llm.breaker`).
+- LLM `explain` → `decision_audit.explanation` (FUSION SPEC §3.1, §6.2 п. 8;
+  `augur.fusion.llm.explain`): схема `SignalExplanation` (strict, без полей действия,
+  `decision_id` сверяется со входом), только для BUY/SELL/CLOSE/REDUCE, один раз на решение
+  (`llm_calls.request_group = decision_audit.id`), один повтор с текстом ошибки, бюджет и
+  breaker задачи `explain`. В Fusion и Risk Gate объяснение не возвращается.
+- Минимальный оркестратор `augur run` (`augur.orchestrator`, ARCH §2.12): последовательный цикл —
+  бары с data-адаптера → `ohlcv` → стратегии `run.strategies` → Fusion → Risk Gate → исполнение
+  стека текущего режима; SL/TP каждый тик; снимок портфеля + CB по PnL, реконсиляция, новости,
+  LLM-контекст, explain, LLM-breaker, алерты — по расписанию. Смена режима подхватывается без
+  рестарта; бар с уже записанными сигналами стратегий повторно не обрабатывается. Сбой задачи —
+  `RUN_ERROR` (не чаще раза в 15 мин), старт/стоп — `RUN_STARTED` / `RUN_STOPPED`.
+- CLI: `augur run [--max-ticks]`, `augur mode promotion [--json]`, `mode set … --approved-by`,
+  `augur alerts dispatch | list [--status] | test`, `augur llm explain [--decision] [--limit]`.
+- Миграция `0008_notify`: `notifications` (outbox, UNIQUE `audit_id`), `notify_cursor` (курсор
+  начинается с текущего конца `audit_log` — история не рассылается).
+- `docs/RUNBOOK_INCIDENTS.md`: переход в FULL_AUTO, алерты, CB, kill switch, расхождение
+  сверки, LLM-breaker, остановка оркестратора, откат.
+
+### Изменено — 0.11.0
+
+- `Settings` (config_version 7): `mode.min_compared_orders`, `mode.max_cost_excess_bps`,
+  `mode.require_alerts`; `notify` (`enabled`, `min_level`, `max_attempts`, `retry_base_s`, …);
+  `run` (таймфрейм, стратегии, интервалы); `fusion.llm.explain_enabled`, `explain_max_age_h`;
+  `risk.blocking_flags_by_mode` по умолчанию блокирует `fusion_contrarian` и в FULL_AUTO.
+- `build_live_stack(mode=None)` выбирает книгу сам (`live_book_mode`); kill switch, `reconcile` и
+  `orders approve` работают и с книгой FULL_AUTO.
+- `augur llm refresh` использует общий `refresh_llm_context` (его же вызывает оркестратор) и
+  записывает переходы LLM-breaker.
+- `augur mode show`: строка promotion — `ready` / `not ready`, подробности в `mode promotion`.
+
+### Не вошло в 0.11.0
+
+- Перенесено в 0.12.0 (решение пользователя): макро-календарь из YAML
+  (`config/macro_calendar.yaml`), nightly job / PSI-дрейф (FUSION SPEC §6.4), `HttpFusionClient`
+  + `augur fusion serve`.
+- LLM-breaker без состояния HALF_OPEN с пробными вызовами (FUSION SPEC §5.4): закрывается, когда
+  отклонённые вызовы выходят из часового окна. Каналы алертов кроме Telegram (webhook, e-mail),
+  Telegram-команда `/kill`, EventBus и `DbWriter` — позже. Комиссия, списанная базовым активом,
+  в сверке с `CostModel` считается в валюте котировки (как её возвращает адаптер).
 
 ### Добавлено — 0.10.0
 

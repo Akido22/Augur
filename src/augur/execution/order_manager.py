@@ -15,10 +15,11 @@ machine по ответу → fills (дедуп) → позиции → `decisio
 `decision_audit` с `strategy_version='system:<leg>'`, ордер — только `reduce_only`.
 Защитные выходы не блокируются ни CB, ни kill switch (skill auto-trade-risk-gate).
 
-Режимы: PAPER — только с адаптером `paper`; MICRO_LIVE (0.7.0) — только с реальным адаптером
-(не `paper`). Первый ордер после входа в MICRO_LIVE остаётся PENDING и ждёт ручного
-подтверждения (`ORDER_APPROVAL_REQUIRED`, `augur.execution.approval`). FULL_AUTO — 0.11.0,
-менеджер его отклоняет.
+Режимы: PAPER — только с адаптером `paper`; MICRO_LIVE (0.7.0) и FULL_AUTO (0.11.0) — только с
+реальным адаптером (не `paper`). Первый ордер после входа в MICRO_LIVE остаётся PENDING и ждёт
+ручного подтверждения (`ORDER_APPROVAL_REQUIRED`, `augur.execution.approval`). FULL_AUTO
+исполняет автоматически в пределах Risk Gate: подтверждения нет, путь тот же (вердикт →
+`decision_audit` → ордер).
 """
 
 import json
@@ -82,7 +83,7 @@ class OrderManager:
     """Args:
     conn: соединение с миграциями 0005+.
     adapter: `ResilientAdapter` над `PaperAdapter` (PAPER) или реальным адаптером (MICRO_LIVE).
-    mode: режим исполнения: PAPER или MICRO_LIVE.
+    mode: режим исполнения (книга): PAPER, MICRO_LIVE или FULL_AUTO.
     app_version / config_hash: для системных записей `decision_audit` и сигналов.
     settings: `settings.execution`.
     clock: «сейчас», Unix ms UTC.
@@ -106,12 +107,12 @@ class OrderManager:
                 raise ExecutionRefusedError(
                     f"PAPER requires the paper venue, got {adapter.venue!r}"
                 )
-        elif mode == TradingMode.MICRO_LIVE:
+        elif mode in (TradingMode.MICRO_LIVE, TradingMode.FULL_AUTO):
             if adapter.venue == "paper":
-                raise ExecutionRefusedError("MICRO_LIVE requires a real venue, got 'paper'")
+                raise ExecutionRefusedError(f"{mode} requires a real venue, got 'paper'")
         else:
             raise ExecutionRefusedError(
-                f"execution supports PAPER and MICRO_LIVE, got {mode} (FULL_AUTO: 0.11.0)"
+                f"execution supports PAPER, MICRO_LIVE and FULL_AUTO, got {mode}"
             )
         self._conn = conn
         self._adapter = adapter

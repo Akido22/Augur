@@ -143,7 +143,7 @@ async def test_e2e_fused_signal_versions_and_replay(db: sqlite3.Connection, tmp_
     disk = sqlite3.connect(db_file)
     disk.execute(
         "INSERT INTO schema_migrations(version, name, checksum, compat, app_version) "
-        "VALUES (7, '0007_ml_llm', 'x', 'expand', '0.10.0')"
+        "VALUES (8, '0008_notify', 'x', 'expand', '0.11.0')"
     )
     disk.commit()
     disk.close()

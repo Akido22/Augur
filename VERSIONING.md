@@ -210,7 +210,8 @@ CREATE TABLE artifacts (
 | **0.8.0** | News | Сбор и нормализация новостей (Finnhub), дедуп, детерминированный `RuleBasedScorer`, `news_event`, реакции (пауза R16, soft flags). Без LLM: LLM-оценка новостей — в 0.10.0 | `db_schema` +1 (`0006_news`); `config` +1 (новости, реакции); `api_version` без изменений (1.0) |
 | **0.9.0** | GUI/CLI | Полный CLI, GUI мониторинга, просмотр цепочки решения по ордеру | `config` по необходимости |
 | **0.10.0** | ML+LLM | Реальная реализация Fusion: ML-модель + LLM (включая LLM-оценку новостей как `SentimentScorer` в fusion-модуле), реестр моделей, replay-тест | `ml_model` с `lightgbm_v1`; новые `<стратегия>@X.Y.Z`, `prompt_*_vN`; `api_version` 1.x или **BREAKING** 2.0 |
-| **0.11.0** | FULL_AUTO | Автоторговля без подтверждения человека в рамках лимитов Risk Gate, алертинг | `config` +1 (режим FULL_AUTO); `db_schema` по необходимости |
+| **0.11.0** | FULL_AUTO | Автоторговля без подтверждения человека в рамках лимитов Risk Gate, promotion-критерии MICRO_LIVE → FULL_AUTO, алертинг (Telegram), LLM `explain`, минимальный оркестратор `augur run`, runbook инцидентов | `config` +1 (режим FULL_AUTO, алерты, оркестратор); `db_schema` +1 (`0008_notify`); `prompt_explain_v1` |
+| **0.12.0** | Хвосты ML+LLM | Макро-календарь из YAML, nightly job / PSI-дрейф (Fusion OPEN по активу), `HttpFusionClient` + `augur fusion serve` | `config` +1; `db_schema` по необходимости |
 | **1.0.0** | Stable | Выполнены все условия §1.3 | `api_version` заморожен на 1.x/2.x; далее строгий SemVer |
 
 Между этапами допускаются PATCH-релизы (`0.6.1`, `0.6.2`) и промежуточные MINOR, если этап требует нескольких релизов: тогда нумерация сдвигается, а этап фиксируется в CHANGELOG.

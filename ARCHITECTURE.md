@@ -105,6 +105,8 @@
 
 Допустимые переходы вверх: `ANALYSIS_ONLY → SIGNAL_ONLY → PAPER → MICRO_LIVE → FULL_AUTO` — только на один шаг за раз. Переход в `FULL_AUTO` требует, чтобы в `MICRO_LIVE` было исполнено не менее `promotion.min_micro_trades` (по умолчанию 20) сделок без срабатывания circuit breaker `[ДОПУЩЕНИЕ]`.
 
+Promotion в `FULL_AUTO` (0.11.0, решения пользователя; `augur.execution.promotion`, `augur mode promotion`) — все условия сразу: (1) не менее `mode.min_micro_trades` исполненных ордеров MICRO_LIVE с момента входа в режим и ни одного `CB_TRIPPED`/`KILL_SWITCH`; (2) сверка исполнения с общей с бэктестом `CostModel` (§15 п. 10): по каждому сигнальному FILLED-ордеру опорная цена — close бара сигнала, модель — `CostModel.fill_price` и `CostModel.fee`; нужно не менее `mode.min_compared_orders` сравнимых ордеров и средний перекос (проскальзывание + комиссия) ≤ `mode.max_cost_excess_bps`; ордер без бара в `ohlcv` не засчитывается; (3) нет активных ордеров MICRO_LIVE; (4) настроен канал алертов (`mode.require_alerts`). Утверждает **один человек**: `augur mode set FULL_AUTO --approved-by <имя> --confirm` с одноразовым кодом; `approved_by` и сводка критериев пишутся в аудит (§15 п. 1 закрыт).
+
 ---
 
 ## 2. Архитектура и модули
@@ -419,6 +421,8 @@ class NotificationRouter:
 
 Каналы: `TelegramNotifier` (Bot API), `EmailNotifier` (SMTP через `aiosmtplib`), `WebhookNotifier` (HMAC-подпись тела).
 
+**Реализация 0.11.0** (`augur.notify`). Канал — только `TelegramNotifier` (httpx, простой текст без разметки; токен и URL не попадают в ошибки и БД). Источник алертов — append-only `audit_log`: `AlertDispatcher.collect()` читает события после `notify_cursor`, правила `ALERT_RULES` выбирают события и уровень (плюс любое событие с severity ERROR/CRITICAL), алерты не ниже `notify.min_level` пишутся в outbox `notifications` (миграция 0008, UNIQUE `audit_id`). `dispatch()` отправляет созревшие с backoff `retry_base_s × 2^(n−1)`, после `notify.max_attempts` — `failed`; без настроенного канала — `skipped`. Ошибки канала не выходят в торговый контур. Отправку вызывают `augur run` и `augur alerts dispatch`. Email, webhook и Telegram-команда `/kill` не реализованы.
+
 ### 2.12. Orchestrator / Scheduler
 
 ```python
@@ -440,6 +444,8 @@ class Orchestrator:
 Периодические задачи: `poll_bars` (на закрытии бара), `poll_news` (60 с), `reconcile` (30 с), `portfolio_snapshot` (60 с), `health_check` (15 с), `expire_signals` (5 с).
 
 Обработчики событий выполняются последовательно **для одного символа** (per-symbol asyncio.Lock) — это гарантирует детерминированный порядок решений.
+
+**Реализация 0.11.0** — минимальный `augur run` (`augur.orchestrator.Runner`): последовательный цикл без `EventBus`, `Scheduler`-классов и `DbWriter`, одно соединение SQLite. Тик (`run.tick_s`): выбор стеков по `mode_state` (PAPER-стек с котировками data-адаптера; live-стек, если конфиг разрешает MICRO_LIVE и режим live или в live-книге остались позиции); на закрытии бара `run.timeframe` — бары → `ohlcv` → стратегии `run.strategies` → `SignalEngine.resolve_signal` → `TradingPipeline.process` стека текущего режима; SL/TP каждый тик; по расписанию — снимок портфеля + CB по PnL (`run.snapshot_s`), `reconcile` (`execution.reconcile_interval_s`), `poll_news`, LLM-контекст (`run.llm_refresh_s`), LLM explain (`run.explain_s`), переходы LLM-breaker, алерты (`run.alerts_s`). Бар, по которому уже записаны сигналы стратегий, повторно не обрабатывается. Сбой задачи — `RUN_ERROR` (не чаще раза в 15 минут на задачу), цикл продолжается. Ордера при остановке не отменяются.
 
 ### 2.13. Interfaces
 
@@ -1180,7 +1186,9 @@ class ModeController:
 - Первый ордер после входа в режим остаётся `PENDING` и в той же транзакции пишет `ORDER_APPROVAL_REQUIRED`. `augur orders approve <id> --confirm`: одноразовый код → `ORDER_APPROVED` + `micro_first_order_confirmed=1` → CLI сам собирает live-стек и отправляет ордер. Ожидание не дольше TTL сигнала: просроченный ордер → `REJECTED` (Reconciler / approve). Системные выходы (SL/TP/flatten) подтверждения не ждут.
 - Стек MICRO_LIVE собирается, когда конфиг разрешает режим, но текущий режим не повышает: пока `mode_state` ниже MICRO_LIVE (до `mode set`, после CB/kill switch), одобренный вердикт не исполняется — `EXECUTION_SKIPPED`.
 - Вход в MICRO_LIVE (`mode set MICRO_LIVE`) начинается со сверки позиций `settings.symbols` с площадкой: торговля ведётся на выделенном субсчёте без базовых активов.
-- Promotion в FULL_AUTO: исполненные (`FILLED`) ордера MICRO_LIVE с момента входа в режим и ни одного `CB_TRIPPED`/`KILL_SWITCH` за это время `[ДОПУЩЕНИЕ]`. Исполнение FULL_AUTO — 0.11.0: `OrderManager` его отклоняет.
+- Promotion в FULL_AUTO — §1.4 (0.11.0).
+
+Реализация FULL_AUTO (0.11.0): `OrderManager` с реальным адаптером исполняет ордера автоматически, без подтверждения первого ордера; R15 по умолчанию блокирует `fusion_contrarian` и в FULL_AUTO. MICRO_LIVE и FULL_AUTO торгуют на одном субсчёте, а позиции и снимки ключуются режимом, поэтому переход между ними (в обе стороны) переносит открытые позиции и последний снимок портфеля в книгу нового режима той же транзакцией, что и `MODE_CHANGED` (`book_transfer`); при активных ордерах в исходной книге переход запрещён. После CB / kill switch книга остаётся у последнего live-режима: `build_live_stack(mode=None)` находит её (`live_book_mode`), чтобы SL/TP, kill switch и сверка работали с ней.
 
 ### 7.2. Pre-trade risk checks
 
@@ -1333,7 +1341,7 @@ class KillSwitch:
 
 Для триггера Fusion: детали того, *что* считается невалидным семантически, — `[→ FUSION SPEC]`; CircuitBreaker считает по `fused_signals.valid` и по событию `FusionInvalid`. `[ДОПУЩЕНИЕ]` Мягкая реакция до CB: после 3 invalid подряд Signal Engine сам переходит в ML-disabled на `fusion.cooldown_s` (300 с).
 
-Kill switch доступен: CLI `augur kill-switch --flatten`, GUI (кнопка + ввод кода), опционально Telegram-команда `/kill` с проверкой chat_id `[ДОПУЩЕНИЕ]`. Kill switch **не требует** кода подтверждения на включение (скорость важнее), только на сброс.
+Kill switch доступен: CLI `augur kill-switch --flatten`, GUI (кнопка + ввод кода), опционально Telegram-команда `/kill` с проверкой chat_id `[ДОПУЩЕНИЕ]` (не реализована). CRITICAL-нотификация CB и kill switch с 0.11.0 — алерт из outbox по событиям `CB_TRIPPED` / `KILL_SWITCH` (§2.11). Kill switch **не требует** кода подтверждения на включение (скорость важнее), только на сброс.
 
 После срабатывания: `augur cb reset --confirm` → режим `PAPER` → эскалация заново через `mode set`.
 
@@ -1498,15 +1506,17 @@ API по умолчанию слушает `127.0.0.1`. Доступ извне 
 Имя команды — `augur`, точка входа — `augur.interfaces.cli.main:app` (`[project.scripts]` в `pyproject.toml`).
 
 ```
-augur run [--mode-check]                         # запуск оркестратора (не реализован)
+augur run [--max-ticks N]                        # минимальный оркестратор (0.11.0, §2.12)
 augur gui [--host] [--port] [--poll] [--db]      # GUI мониторинга + REST + /ws/events (0.9.0)
 augur backtest --strategy sma_cross --symbol BTC/USDT --tf 1h --from 2024-01-01 --to 2025-01-01 [--params params.json]
 augur signals list [--symbol] [--since] [--kind] [--limit]
 augur signals explain <signal_id|order_id> [--json]
 augur news fetch | list [--symbol] [--limit] | reactions | lift <id> --confirm
 augur config validate                            # проверка .env/конфига для текущего режима
-augur mode show
-augur mode set <MODE> --confirm                  # запрос + ввод одноразового кода
+augur mode show | promotion [--json]
+augur mode set <MODE> --confirm [--approved-by]  # запрос + ввод одноразового кода; FULL_AUTO — с --approved-by
+augur alerts dispatch | list [--status] | test   # алерты (0.11.0, §2.11)
+augur llm refresh --symbol | usage | explain [--decision] [--limit]
 augur auto-trade enable                          # = mode set PAPER→... по шагам; алиас
 augur auto-trade disable                         # downgrade до SIGNAL_ONLY
 augur orders list|cancel <id>|approve <id>
@@ -1521,7 +1531,9 @@ augur data backfill --symbol --tf --days
 
 Пакет `src/augur/interfaces/dto.py` — единственный источник моделей для GUI и CLI: `StatusDTO`, `SignalDTO`, `DecisionChainDTO`, `OrderDTO`, `PositionDTO`, `PortfolioSnapshotDTO`, `BacktestRequestDTO`, `BacktestResultDTO`, `NewsDTO`, `ModeChangeRequestDTO`, `KillSwitchRequestDTO`. CLI использует сервисный слой напрямую (in-process) либо HTTP-клиент к запущенному процессу (`--remote`) — с теми же DTO.
 
-Статус 0.9.0 по CLI: реализованы `signals list|explain`, `audit explain|verify-chain`, `gui`. Не реализованы: `run`, `config validate`, `auto-trade enable|disable`, `orders cancel`, `audit replay`, `data backfill`, флаг `--remote`. Сервисный слой: `interfaces/queries.py` (`ReadService` — только SELECT, `verify_audit_chain`) и `interfaces/control.py` (`engage_kill_switch` — общий для CLI и REST). DTO `BacktestRequestDTO`, `BacktestResultDTO`, `ModeChangeRequestDTO` не созданы (нет соответствующих эндпоинтов); добавлены `FusedSignalDTO`, `DecisionAuditDTO`, `FillDTO`, `AuditEventDTO`, `NewsReactionDTO`, `AuditChainReportDTO`, `KillSwitchResultDTO`, `EventDTO`.
+Статус 0.11.0 по CLI: добавлены `run`, `mode promotion`, `mode set FULL_AUTO --approved-by`, `alerts dispatch|list|test`, `llm explain`.
+
+Статус 0.9.0 по CLI: реализованы `signals list|explain`, `audit explain|verify-chain`, `gui`. Не реализованы: `config validate`, `auto-trade enable|disable`, `orders cancel`, `audit replay`, `data backfill`, флаг `--remote`. Сервисный слой: `interfaces/queries.py` (`ReadService` — только SELECT, `verify_audit_chain`) и `interfaces/control.py` (`engage_kill_switch` — общий для CLI и REST). DTO `BacktestRequestDTO`, `BacktestResultDTO`, `ModeChangeRequestDTO` не созданы (нет соответствующих эндпоинтов); добавлены `FusedSignalDTO`, `DecisionAuditDTO`, `FillDTO`, `AuditEventDTO`, `NewsReactionDTO`, `AuditChainReportDTO`, `KillSwitchResultDTO`, `EventDTO`.
 
 ---
 
@@ -1787,7 +1799,8 @@ description: Use BEFORE creating or changing anything in src/augur/risk or src/a
 | 8 | News | фетчер Finnhub, нормализация, дедуп, `RuleBasedScorer`, `news_event`, реакции (R16, soft flags); без LLM |
 | 9 | GUI/CLI | полный CLI, GUI мониторинга, цепочка решения по ордеру; GUI-страницы |
 | 10 | ML+LLM | реальная реализация Fusion: ML-модель, LLM-контекст и LLM-скорер новостей (`SentimentScorer` в fusion-модуле), реестр моделей, replay-тест |
-| 11 | FULL_AUTO | promotion-критерии, мониторинг, алерты, runbook инцидентов |
+| 11 | FULL_AUTO | promotion-критерии (сделки без CB, сверка с `CostModel`, алерты, утверждающий), автоисполнение FULL_AUTO, алерты Telegram из `audit_log`, LLM `explain`, минимальный `augur run`, `docs/RUNBOOK_INCIDENTS.md` |
+| 12 | Хвосты ML+LLM | макро-календарь из YAML, nightly job / PSI-дрейф, `HttpFusionClient` + `augur fusion serve` |
 
 Нумерация этапов совпадает с MINOR-версиями `VERSIONING.md` §4 (этап N = `0.N.0`). Установка внешних skills (с пином), hooks, MT5-bridge и Alpaca-исполнение — по мере необходимости, вне этой нумерации.
 
@@ -1807,7 +1820,7 @@ ML- и LLM-этапы реализуются по `ML_LLM_FUSION_SPEC.md` и п�
 
 ## 15. Риски и открытые вопросы
 
-1. **Автоторговля реальными деньгами.** Ошибка в sizing или state machine приводит к прямым убыткам. Меры: лестница режимов, micro-cap, CB, kill switch, golden-тесты, ключи без права вывода. Открыто: кто и как утверждает переход в `FULL_AUTO` (один человек или «four eyes»)?
+1. **Автоторговля реальными деньгами.** Ошибка в sizing или state machine приводит к прямым убыткам. Меры: лестница режимов, micro-cap, CB, kill switch, golden-тесты, ключи без права вывода. Решено в 0.11.0: переход в `FULL_AUTO` утверждает один человек (`--approved-by` + одноразовый код, запись в аудит), при выполненных критериях §1.4.
 2. **Агент обошёл skill / ослабил риск-контур.** Skill — это инструкция, а не гарантия. Меры: import-linter, semgrep, CODEOWNERS, golden-тесты, hooks. Остаточный риск: изменение самих тестов агентом — требуется ревью человека для `tests/golden/`.
 3. **Дублирование ML/LLM-логики вне fusion-модуля.** Агент может «удобно» добавить LLM-вызов в news или signals. Меры: запрет импортов, `SentimentScorer` как Protocol, ревью. Открыто: где физически живёт Fusion-реализация — отдельный репозиторий или пакет в монорепо?
 4. **Расхождение контракта `fused_signal` между двумя спецификациями.** Меры: схема в одном месте — `ML_LLM_FUSION_SPEC.md` §4.6 (источник истины; ARCH §5.3 только ссылается), версия `api_version`, contract-тесты (`tests/test_fusion_contract.py`). Владелец схемы определён в 0.4.0 — FUSION SPEC §4.6.
@@ -1816,7 +1829,7 @@ ML- и LLM-этапы реализуются по `ML_LLM_FUSION_SPEC.md` и п�
 7. **MetaTrader 5 только под Windows.** Нужен Windows-хост и RPC-мост; отдельная точка отказа и задержки. Открыто: допустим ли такой деплой, или Форекс через другой API (например, REST-брокер)?
 8. **SQLite как единственное хранилище.** Single-writer снимает блокировки, но ограничивает пропускную способность и не даёт HA. Для тиковых данных по многим символам может не хватить. Открыто: нужен ли путь миграции на PostgreSQL/TimescaleDB.
 9. **Детерминизм vs. внешний мир.** Ответы площадок, частичные исполнения и LLM не детерминированы; воспроизводимость гарантируется только для цепочки «данные → решение», а не для исполнения. Replay Fusion — только из сохранённых результатов.
-10. **Расхождение бэктеста и live.** Проскальзывание, задержки, недоступность ликвидности, funding/свопы. Меры: общий код `PaperBroker`/бэктест, walk-forward, сравнение paper vs. backtest за одинаковый период перед эскалацией режима.
+10. **Расхождение бэктеста и live.** Проскальзывание, задержки, недоступность ликвидности, funding/свопы. Меры: общий код `PaperBroker`/бэктест, walk-forward, сравнение paper vs. backtest за одинаковый период перед эскалацией режима. С 0.11.0 перед `FULL_AUTO` исполнение MICRO_LIVE сверяется с `CostModel` бэктеста по close бара сигнала (§1.4); полный бэктест-реплей за период не делается — бэктест не воспроизводит Fusion.
 11. **Внешние skills как вектор атаки (supply chain).** SKILL.md исполняется агентом с доступом к репозиторию. Меры: пин коммита, ревью, отсутствие ключей live-счетов в окружении агента.
 
 ---

@@ -1,4 +1,4 @@
-"""Execution / Auto-Trading (ARCHITECTURE.md §2.9, §7) — PAPER (0.6.0) и MICRO_LIVE (0.7.0).
+"""Execution / Auto-Trading (ARCHITECTURE.md §2.9, §7): PAPER, MICRO_LIVE, FULL_AUTO (0.11.0).
 
 Путь к площадке только один: `RiskGate` → `decision_audit` (COMMIT) → `OrderManager`.
 Публичные классы: `ModeController`, `OrderManager`, `PositionManager`, `CircuitBreaker`,
@@ -21,6 +21,7 @@ from augur.execution.modes import (
     ModeController,
     ModeStore,
     PromotionStatus,
+    live_book_mode,
 )
 from augur.execution.order_manager import ExecutionRefusedError, OrderManager, restore_paper_broker
 from augur.execution.pipeline import (
@@ -48,6 +49,7 @@ __all__ = [
     "ModeChangeTicket",
     "ModeController",
     "PromotionStatus",
+    "live_book_mode",
     "build_live_stack",
     "CBStatus",
     "CircuitBreaker",

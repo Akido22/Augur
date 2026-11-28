@@ -6,7 +6,7 @@
 1) `cb_state = TRIPPED` (persist); 2) Risk Gate R2 блокирует новые входы;
 3) `cancel_all` открытых ордеров НА ВХОД; 4) режим → PAPER-hold (позиции не закрываются,
    если не включено `cb.flatten_on_trip`); 5) `audit_log: CB_TRIPPED` (CRITICAL);
-6) CRITICAL-нотификация — модуль Notify ещё не реализован, пока `logging.critical`.
+6) CRITICAL-нотификация — алерт из outbox `augur.notify` по событию `CB_TRIPPED` (0.11.0).
 SL/TP и закрытие позиций при TRIPPED продолжают работать.
 
 `reset(actor, confirm_code)` — только с одноразовым кодом (`issue_reset_code`, TTL
@@ -201,9 +201,7 @@ class CircuitBreaker:
         except BaseException:
             self._conn.rollback()
             raise
-        log.critical(
-            "CIRCUIT BREAKER TRIPPED: %s", reason
-        )  # Notify — отдельный модуль (ARCH §2.11)
+        log.critical("CIRCUIT BREAKER TRIPPED: %s", reason)  # алерт — outbox по CB_TRIPPED
         if self._orders is not None:
             await self._orders.cancel_all(
                 reason=f"cb trip: {trigger.value}", actor=actor, entry_only=True

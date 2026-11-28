@@ -31,6 +31,7 @@ from augur.execution import (
     ModeController,
     ModeStore,
     OrderRepository,
+    PromotionStatus,
     build_live_stack,
 )
 from augur.execution.approval import awaiting_approval, first_order_confirmed
@@ -520,9 +521,47 @@ def mode_show(db: str = DbOption) -> None:
     typer.echo(f"micro 1st order:  {'confirmed' if confirmed else 'awaits approval'}")
     typer.echo(f"awaiting orders:  {', '.join(waiting) or '-'}")
     typer.echo(
-        f"FULL_AUTO promo:  {promo.micro_trades}/{promo.required} trades, "
-        f"cb_tripped_since_entry={promo.cb_tripped_since_entry}"
+        f"FULL_AUTO promo:  {'ready' if promo.ok else 'not ready'} "
+        f"({promo.micro_trades}/{promo.required} trades; details: augur mode promotion)"
     )
+
+
+def _print_promotion(promo: PromotionStatus) -> None:
+    mean = "-" if promo.mean_cost_excess_bps is None else f"{promo.mean_cost_excess_bps:.2f}"
+    typer.echo(f"MICRO_LIVE since:     {_fmt_ts(promo.since_ts)}")
+    typer.echo(f"filled trades:        {promo.micro_trades}/{promo.required}")
+    typer.echo(f"CB/kill since entry:  {'yes' if promo.cb_tripped_since_entry else 'no'}")
+    typer.echo(
+        f"vs CostModel:         {promo.compared_orders}/{promo.required_compared} orders "
+        f"compared (uncomparable {promo.uncomparable_orders}), mean excess {mean} bps "
+        f"(limit {promo.max_cost_excess_bps})"
+    )
+    typer.echo(f"active MICRO_LIVE:    {promo.active_orders} orders")
+    typer.echo(f"alerts configured:    {'yes' if promo.alerts_configured else 'no'}")
+    reasons = promo.reasons()
+    typer.echo("FULL_AUTO promotion:  " + ("READY" if not reasons else "NOT READY"))
+    for r in reasons:
+        typer.echo(f"  - {r}")
+
+
+@mode_app.command("promotion")
+def mode_promotion(
+    as_json: bool = typer.Option(False, "--json", help="Вывод в JSON."),
+    db: str = DbOption,
+) -> None:
+    """Критерии перехода MICRO_LIVE → FULL_AUTO: сделки, CB, сверка с CostModel, алерты."""
+    settings = _require_settings()
+    conn = _open_db(db)
+    try:
+        promo = ModeController(conn, settings=settings, clock=_now_ms).promotion_status()
+    finally:
+        conn.close()
+    if as_json:
+        typer.echo(promo.model_dump_json(indent=2))
+    else:
+        _print_promotion(promo)
+    if not promo.ok:
+        raise typer.Exit(code=1)
 
 
 def ctl_mode_line(stored: TradingMode | None, settings: Settings) -> str:
@@ -536,11 +575,15 @@ def mode_set(
     target: TradingMode = ModeArg,
     confirm: bool = typer.Option(False, "--confirm", help="Обязательно: подтверждение смены."),
     reason: str = typer.Option("manual", "--reason", help="Причина (для понижения)."),
+    approved_by: str = typer.Option(
+        "", "--approved-by", help="FULL_AUTO: кто утверждает переход (пишется в аудит)."
+    ),
     db: str = DbOption,
 ) -> None:
     """Сменить режим. Повышение — на один шаг, с кодом для MICRO_LIVE/FULL_AUTO; понижение — сразу.
 
     Вход в MICRO_LIVE: сначала сверка позиций `settings.symbols` с реальной площадкой.
+    Вход в FULL_AUTO: критерии promotion (`augur mode promotion`) и `--approved-by`.
     """
     if not confirm:
         typer.echo("ERROR: --confirm is required", err=True)
@@ -558,6 +601,9 @@ def mode_set(
                 ctl.downgrade(target, actor=_actor(), reason=reason)
             elif target == TradingMode.MICRO_LIVE:
                 asyncio.run(_with_live(conn, settings, lambda st: _escalate(ctl, target, st)))
+            elif target == TradingMode.FULL_AUTO:
+                _print_promotion(ctl.promotion_status())
+                asyncio.run(_escalate(ctl, target, None, approved_by=approved_by or None))
             else:
                 asyncio.run(_escalate(ctl, target, None))
         except ModeChangeError as e:
@@ -569,9 +615,17 @@ def mode_set(
     typer.echo(f"mode {current.value} -> {new.value}")
     if new == TradingMode.MICRO_LIVE:
         typer.echo("first MICRO_LIVE order will wait for: augur orders approve <id> --confirm")
+    if new == TradingMode.FULL_AUTO:
+        typer.echo("FULL_AUTO: orders are sent automatically within Risk Gate limits (augur run)")
 
 
-async def _escalate(ctl: ModeController, target: TradingMode, stack: LiveStack | None) -> None:
+async def _escalate(
+    ctl: ModeController,
+    target: TradingMode,
+    stack: LiveStack | None,
+    *,
+    approved_by: str | None = None,
+) -> None:
     ctl.check_escalation(target)
     if stack is not None:
         mismatches = await stack.reconciler.check_positions()
@@ -582,7 +636,7 @@ async def _escalate(ctl: ModeController, target: TradingMode, stack: LiveStack |
                 "positions at the venue differ from the DB: use a dedicated subaccount with no "
                 f"base assets for {', '.join(sorted({m.symbol for m in mismatches}))}"
             )
-    ticket = await ctl.request_change(target, actor=_actor())
+    ticket = await ctl.request_change(target, actor=_actor(), approved_by=approved_by)
     code = ticket.code
     if ticket.code_required:
         typer.echo(f"{ticket.source.value} -> {ticket.target.value}")
@@ -1142,34 +1196,23 @@ def llm_refresh(
     db: str = DbOption,
 ) -> None:
     """Один цикл LLM-контекста по активу: новости + сводка цены → llm_contexts."""
-    from augur.fusion.factory import build_llm_context_service
-    from augur.fusion.llm.inputs import load_news_inputs, load_price_summary
+    from augur.fusion.factory import refresh_llm_context
+    from augur.fusion.llm.breaker import sync_breaker_states
 
     settings = _require_settings()
-    lcfg = settings.fusion.llm
     conn = _open_db(db)
     try:
-        now = _now_ms()
-        news = load_news_inputs(
-            conn,
-            asset=symbol,
-            as_of=now,
-            window_h=lcfg.news_window_h,
-            limit=lcfg.max_news,
-            body_chars=lcfg.news_body_chars,
-        )
-        price = load_price_summary(
-            conn,
-            venue=settings.fusion.ml.venue,
-            asset=symbol,
-            timeframe=timeframe,
-            as_of=now,
-            window_h=lcfg.news_window_h,
-        )
-        svc = build_llm_context_service(conn, settings, clock=_now_ms)
         res = asyncio.run(
-            svc.refresh(symbol, as_of=now, news=news, price=price, event_driven=event)
+            refresh_llm_context(
+                conn,
+                settings,
+                symbol=symbol,
+                timeframe=timeframe,
+                clock=_now_ms,
+                event_driven=event,
+            )
         )
+        sync_breaker_states(conn, settings.fusion.llm, clock=_now_ms)
     finally:
         conn.close()
     typer.echo(f"{res.status} reason={res.reject_reason or '-'} calls={res.llm_call_ids}")
@@ -1227,3 +1270,151 @@ def fusion_replay(
             typer.echo(f"  {f}: recorded={res.recorded[f]!r} replayed={res.replayed[f]!r}")
     if not res.match:
         raise typer.Exit(code=1)
+
+
+@llm_app.command("explain")
+def llm_explain(
+    decision_id: str = typer.Option("", "--decision", help="id decision_audit; пусто — очередь."),
+    limit: int = typer.Option(5, "--limit", min=1, help="Сколько решений из очереди."),
+    db: str = DbOption,
+) -> None:
+    """LLM explain → decision_audit.explanation (только BUY/SELL/CLOSE/REDUCE; один раз)."""
+    from augur.fusion.factory import build_explain_service
+    from augur.fusion.llm.breaker import sync_breaker_states
+
+    settings = _require_settings()
+    lcfg = settings.fusion.llm
+    if lcfg.mode != "enabled" or not lcfg.explain_enabled:
+        typer.echo("ERROR: LLM explain is disabled (FUSION__LLM__MODE / EXPLAIN_ENABLED)", err=True)
+        raise typer.Exit(code=1)
+    conn = _open_db(db)
+    try:
+        svc = build_explain_service(conn, settings, clock=_now_ms)
+        if decision_id:
+            results = [asyncio.run(svc.explain(decision_id))]
+        else:
+            results = asyncio.run(svc.explain_pending(limit))
+        sync_breaker_states(conn, lcfg, clock=_now_ms)
+    finally:
+        conn.close()
+    if not results:
+        typer.echo("nothing to explain")
+    for r in results:
+        typer.echo(f"{r.decision_id}: {r.status} calls={r.llm_call_ids}")
+
+
+# --- Алерты (0.11.0, ARCH §2.11) ---------------------------------------------------------
+
+alerts_app = typer.Typer(help="Алерты: отправка outbox, журнал, тест канала.", no_args_is_help=True)
+app.add_typer(alerts_app, name="alerts")
+
+
+def _notifier(settings: Settings) -> Any:
+    """Канал алертов; None — не настроен. Подменяется в тестах."""
+    from augur.notify import build_notifier
+
+    return build_notifier(settings)
+
+
+@alerts_app.command("dispatch")
+def alerts_dispatch(db: str = DbOption) -> None:
+    """Собрать алерты из audit_log и отправить созревшие (Telegram)."""
+    from augur.notify import AlertDispatcher
+
+    settings = _require_settings()
+    conn = _open_db(db)
+    try:
+        rep = asyncio.run(
+            AlertDispatcher(conn, settings.notify, _notifier(settings), clock=_now_ms).dispatch()
+        )
+    finally:
+        conn.close()
+    typer.echo(
+        f"collected={rep.collected} sent={rep.sent} retried={rep.retried} "
+        f"failed={rep.failed} skipped={rep.skipped}"
+    )
+
+
+@alerts_app.command("list")
+def alerts_list(
+    status: str = typer.Option("", "--status", help="pending | sent | failed | skipped."),
+    limit: int = typer.Option(20, "--limit", min=1),
+    db: str = DbOption,
+) -> None:
+    """Журнал алертов (новые сверху)."""
+    conn = _open_db(db)
+    try:
+        sql = "SELECT id, created_ts, level, kind, status, attempts, last_error FROM notifications"
+        params: list[object] = []
+        if status:
+            sql += " WHERE status = ?"
+            params.append(status)
+        rows = conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        typer.echo("no alerts")
+    for nid, ts, level, kind, st, att, err in rows:
+        typer.echo(
+            f"{nid:>5} {_fmt_ts(ts)} {level:<8} {kind:<24} {st:<8} attempts={att} {err or ''}"
+        )
+
+
+@alerts_app.command("test")
+def alerts_test() -> None:
+    """Отправить тестовое сообщение в канал (проверка токена и chat_id)."""
+    from augur.notify import Notification, NotifyError
+
+    settings = _require_settings()
+    notifier = _notifier(settings)
+    if notifier is None:
+        typer.echo("ERROR: alerts not configured (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)", err=True)
+        raise typer.Exit(code=1)
+    msg = Notification(level="INFO", kind="TEST", title="Augur test alert", body=version_line())
+    try:
+        asyncio.run(notifier.send(msg))
+    except NotifyError as e:
+        typer.echo(f"ERROR: send failed: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    typer.echo("test alert sent")
+
+
+# --- Оркестратор (0.11.0, ARCH §2.12) ----------------------------------------------------
+
+
+def _data_adapter(settings: Settings) -> Any:
+    """Источник баров/котировок для `augur run`: CCXT из настроек. Подменяется в тестах."""
+    from augur.adapters.ccxt_adapter import CcxtAdapter
+
+    return CcxtAdapter(settings)
+
+
+@app.command("run")
+def run(
+    max_ticks: int = typer.Option(0, "--max-ticks", min=0, help="Остановиться после N тиков."),
+    db: str = DbOption,
+) -> None:
+    """Оркестратор: бары → сигналы → Fusion → Risk Gate → исполнение; SL/TP, сверка, алерты.
+
+    Режим — из mode_state (не выше конфига). Ctrl+C — остановка без отмены ордеров.
+    """
+    from augur.orchestrator import Runner
+
+    settings = _require_settings()
+    conn = _open_db(db)
+    runner = Runner(
+        conn,
+        settings,
+        clock=_now_ms,
+        data_adapter=_data_adapter(settings),
+        live_adapter=_live_adapter(settings),
+        notifier=_notifier(settings),
+    )
+    net = "TESTNET" if settings.ccxt_sandbox else "REAL MONEY"
+    typer.echo(f"augur run: {', '.join(settings.symbols)} {settings.run.timeframe} ({net})")
+    try:
+        asyncio.run(runner.run_forever(max_ticks=max_ticks or None))
+    except KeyboardInterrupt:
+        typer.echo("stopped")
+    finally:
+        conn.close()

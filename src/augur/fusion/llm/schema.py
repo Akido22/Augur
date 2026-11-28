@@ -7,7 +7,7 @@ LLM не предлагает сделку: полей action/amount/execute в 
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
@@ -18,6 +18,7 @@ __all__ = [
     "RiskFlag",
     "RiskFlagCode",
     "Severity",
+    "SignalExplanation",
 ]
 
 
@@ -99,4 +100,32 @@ class NewsSentimentOut(BaseModel):
         expected = (info.context or {}).get("news_id")
         if v != expected:
             raise ValueError(f"ungrounded news_id {v!r}")
+        return v
+
+
+class SignalExplanation(BaseModel):
+    """Выход LLM `explain` (`prompt_explain_v1`, FUSION SPEC §3.1): текст только для аудита.
+
+    Пишется в `decision_audit.explanation` и никогда не возвращается в цепочку решения.
+    Полей действия/направления/объёма нет; `decision_id` должен совпасть с входом.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["1.0"]
+    decision_id: str
+    summary: str = Field(min_length=1, max_length=800)
+    key_factors: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        min_length=1, max_length=5
+    )
+    caveats: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        default_factory=list, max_length=3
+    )
+
+    @field_validator("decision_id")
+    @classmethod
+    def _grounded(cls, v: str, info: ValidationInfo) -> str:
+        expected = (info.context or {}).get("decision_id")
+        if v != expected:
+            raise ValueError(f"ungrounded decision_id {v!r}")
         return v

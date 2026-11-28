@@ -4,7 +4,7 @@
 - `pause_symbol` / `pause_strategy` → R16 блокирует открытие новых позиций (CLOSE/REDUCE — нет);
 - `add_risk_flag` → флаг `{code, severity}` попадает в R15 (blocking / high) и в sizing
   (soft_flags → qty × risk_flag_multiplier) для сигналов по символу;
-- `notify` → только запись в аудит и лог (модуля уведомлений ещё нет).
+- `notify` → запись в аудит и лог; алерт уходит из outbox `augur.notify` (0.11.0).
 
 Эффекты живут в `news_reactions` со сроком `published_ts + duration_min`: старая новость,
 пришедшая с опозданием, не ставит паузу задним числом дольше, чем на остаток срока. Каждое

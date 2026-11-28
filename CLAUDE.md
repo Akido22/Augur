@@ -51,6 +51,8 @@ augur backtest              # бэктест стратегии (заглушк�
 augur kill-switch           # аварийная остановка: KILLED, ANALYSIS_ONLY, отмена ордеров, flatten
 augur cb status | cb reset --confirm   # состояние CB; сброс по одноразовому коду → PAPER
 augur mode show | mode set <MODE> --confirm   # режим; повышение на шаг с кодом, понижение сразу
+augur mode promotion [--json]                # критерии MICRO_LIVE → FULL_AUTO
+augur mode set FULL_AUTO --approved-by <имя> --confirm   # FULL_AUTO: promotion + код
 augur orders approve <id> --confirm    # подтвердить и отправить первый ордер MICRO_LIVE
 augur reconcile                        # сверка ордеров/позиций с реальной площадкой
 augur news fetch | list [--symbol]      # один цикл сбора новостей (Finnhub); лента
@@ -60,6 +62,9 @@ augur audit explain <id> | verify-chain      # цепочка решения; п
 augur gui [--host 127.0.0.1] [--port 8000]   # GUI мониторинга + REST /api/v1 + /ws/events (Bearer)
 augur ml train --symbol S | list | promote <v> --to … --approved-by … --confirm | replay <id>
 augur llm refresh --symbol S [--event] | usage   # LLM-контекст актива; расход за сутки
+augur llm explain [--decision <id>] [--limit N]  # LLM explain → decision_audit.explanation
+augur alerts dispatch | list [--status] | test   # алерты из audit_log → Telegram
+augur run [--max-ticks N]                    # оркестратор: бар → сигнал → Risk Gate → ордер
 augur fusion replay <id> [--json]            # fuse() на сохранённых входах, сверка с записью
 ```
 

@@ -165,10 +165,13 @@ async def test_full_auto_requires_promotion(db: sqlite3.Connection) -> None:
     with pytest.raises(ModeChangeError, match="promotion"):
         await ctl.request_change(TradingMode.FULL_AUTO, actor="t")
     await _filled_micro_orders(db, 3, clock.now)
-    assert ctl.promotion_status().ok
-    ticket = await ctl.request_change(TradingMode.FULL_AUTO, actor="t")
-    assert ticket.code_required
-    assert ctl.confirm_change(ticket.ticket_id, ticket.code, actor="t") == TradingMode.FULL_AUTO
+    st = ctl.promotion_status()
+    assert st.micro_trades == 3 and not st.cb_tripped_since_entry
+    # 0.11.0: сделок мало для FULL_AUTO — нужна ещё сверка с CostModel и алерты
+    # (успешный путь — tests/test_full_auto.py)
+    assert not st.ok and any("CostModel" in r for r in st.reasons())
+    with pytest.raises(ModeChangeError, match="CostModel"):
+        await ctl.request_change(TradingMode.FULL_AUTO, actor="t", approved_by="a")
 
 
 async def test_promotion_resets_after_cb_trip(db: sqlite3.Connection) -> None:

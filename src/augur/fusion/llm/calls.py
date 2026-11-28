@@ -15,11 +15,24 @@ from augur.config.settings import LLMProvider, LLMSettings
 from augur.fusion.llm.client import LLMClient, LLMHTTPError
 from augur.fusion.llm.sanitize import find_secret
 
-__all__ = ["Attempt", "CallLog", "CallRunner", "Task"]
+__all__ = ["Attempt", "CallLog", "CallRunner", "Task", "breaker_stats"]
 
 Task = Literal["context", "explain", "news_sentiment"]
 _HOUR_MS = 3_600_000
 _DAY_MS = 86_400_000
+
+
+def breaker_stats(
+    conn: sqlite3.Connection, cfg: LLMSettings, task: Task, *, now: int
+) -> tuple[bool, int, int]:
+    """(открыт ли LLM-breaker, вызовов за час, отклонённых за час) по `llm_calls` (§5.4)."""
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(status NOT IN ('ok','budget_block')), 0) FROM llm_calls "
+        "WHERE task=? AND created_at >= ? AND status <> 'budget_block'",
+        (task, now - _HOUR_MS),
+    ).fetchone()
+    total, bad = int(row[0]), int(row[1])
+    return total >= cfg.breaker_min_calls and bad / total > cfg.breaker_reject_ratio, total, bad
 
 
 @dataclass(frozen=True)
@@ -142,13 +155,7 @@ class CallRunner:
 
     def breaker_open(self, task: Task) -> bool:
         """LLM-breaker (§5.4): доля отклонённых за час > порога при ≥ min_calls вызовов."""
-        row = self._conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(status NOT IN ('ok','budget_block')), 0) FROM llm_calls "
-            "WHERE task=? AND created_at >= ? AND status <> 'budget_block'",
-            (task, self._clock() - _HOUR_MS),
-        ).fetchone()
-        total, bad = int(row[0]), int(row[1])
-        return total >= self._cfg.breaker_min_calls and bad / total > self._cfg.breaker_reject_ratio
+        return breaker_stats(self._conn, self._cfg, task, now=self._clock())[0]
 
     def known_secrets(self) -> list[str]:
         return [k.get_secret_value() for k in self._keys.values() if k is not None]

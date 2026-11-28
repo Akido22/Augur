@@ -15,6 +15,10 @@ CB с хуком ошибок адаптера, kill switch, Reconciler, PostTra
 конфиг разрешает MICRO_LIVE; ТЕКУЩИЙ режим он не повышает. Пока режим ниже MICRO_LIVE (до
 `augur mode set`, после CB/kill switch), одобренные вердикты не исполняются:
 `EXECUTION_SKIPPED`. Kill switch, SL/TP и Reconciler работают при любом режиме.
+
+0.11.0: `build_live_stack(mode=None)` сам выбирает книгу реального счёта (`live_book_mode`):
+текущий live-режим, а ниже MICRO_LIVE — режим, в книге которого остались позиции/ордера
+(после CB / kill switch из FULL_AUTO — FULL_AUTO). FULL_AUTO — без подтверждения первого ордера.
 """
 
 import logging
@@ -36,7 +40,7 @@ from augur.db.audit import append_audit
 from augur.execution.approval import FirstOrderApproval
 from augur.execution.circuit_breaker import CircuitBreaker
 from augur.execution.kill_switch import KillSwitch
-from augur.execution.modes import ModeStore, mode_rank
+from augur.execution.modes import LIVE_MODES, ModeStore, live_book_mode, mode_rank
 from augur.execution.order_manager import (
     ExecutionRefusedError,
     OrderManager,
@@ -271,13 +275,16 @@ def build_live_stack(
     clock: Callable[[], int],
     adapter: MarketAdapter | None = None,
     policy: CallPolicy | None = None,
+    mode: TradingMode | None = None,
 ) -> LiveStack:
-    """Собрать MICRO_LIVE-исполнение над реальной площадкой (по умолчанию — CCXT spot).
+    """Собрать live-исполнение (MICRO_LIVE / FULL_AUTO) над реальной площадкой (CCXT spot).
 
-    Адаптер не подключается: `await stack.venue_adapter.connect()` — на вызывающем.
+    `mode` — книга; None — `live_book_mode` по `mode_state` и БД. Адаптер не подключается:
+    `await stack.venue_adapter.connect()` — на вызывающем.
 
     Raises:
-        ExecutionRefusedError: конфиг не разрешает MICRO_LIVE, нет ключей CCXT или адаптер `paper`.
+        ExecutionRefusedError: конфиг не разрешает MICRO_LIVE (или выбранную книгу), нет ключей
+            CCXT или адаптер `paper`.
     """
     for name, value in (
         ("trading_mode", settings.trading_mode),
@@ -285,6 +292,12 @@ def build_live_stack(
     ):
         if mode_rank(value) < mode_rank(TradingMode.MICRO_LIVE):
             raise ExecutionRefusedError(f"settings.{name}={value} does not allow MICRO_LIVE")
+    if mode is None:
+        mode = live_book_mode(
+            conn, ModeStore(conn, configured_mode=settings.trading_mode).current()
+        )
+    if mode not in LIVE_MODES:
+        raise ExecutionRefusedError(f"live stack needs MICRO_LIVE or FULL_AUTO, got {mode}")
     if adapter is None:
         if settings.ccxt_api_key is None or settings.ccxt_api_secret is None:
             raise ExecutionRefusedError("MICRO_LIVE requires CCXT_API_KEY and CCXT_API_SECRET")
@@ -293,7 +306,7 @@ def build_live_stack(
         conn,
         settings,
         adapter,
-        mode=TradingMode.MICRO_LIVE,
+        mode=mode,
         app_version=app_version,
         clock=clock,
         policy=policy,

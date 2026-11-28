@@ -156,8 +156,11 @@ def test_mode_and_venue_must_match(db: sqlite3.Connection) -> None:
 
     with pytest.raises(ExecutionRefusedError, match="paper venue"):
         OrderManager(db, Live(), mode=TradingMode.PAPER, **kw)
-    with pytest.raises(ExecutionRefusedError, match="FULL_AUTO"):
-        OrderManager(db, Live(), mode=TradingMode.FULL_AUTO, **kw)
+    with pytest.raises(ExecutionRefusedError, match="real venue"):
+        OrderManager(db, PaperAdapter(), mode=TradingMode.FULL_AUTO, **kw)
+    with pytest.raises(ExecutionRefusedError, match="SIGNAL_ONLY"):
+        OrderManager(db, Live(), mode=TradingMode.SIGNAL_ONLY, **kw)
+    assert OrderManager(db, Live(), mode=TradingMode.FULL_AUTO, **kw).mode == TradingMode.FULL_AUTO
     assert OrderManager(db, Live(), mode=TradingMode.MICRO_LIVE, **kw).venue == "binance"
 
 

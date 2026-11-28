@@ -42,8 +42,9 @@ RISK__MICRO_LIVE_MAX_NOTIONAL=20
 
 То же, но `CCXT_SANDBOX=false` и ключ субсчёта. CLI должен печатать `REAL MONEY`.
 
-- Первые сутки после каждого ордера запускайте `augur reconcile`. Оркестратора с периодической
-  сверкой пока нет.
+- Первые сутки после каждого ордера запускайте `augur reconcile`. С 0.11.0 `augur run` сверяет
+  сам каждые `EXECUTION__RECONCILE_INTERVAL_S`; инциденты и переход в FULL_AUTO —
+  `docs/RUNBOOK_INCIDENTS.md`.
 - SL/TP на spot биржа не держит: защитные выходы срабатывают, только пока работает процесс
   (`check_protective_exits`).
 - Любое расхождение → CB `reconcile_mismatch`. Разберитесь вручную, затем `augur cb reset --confirm`

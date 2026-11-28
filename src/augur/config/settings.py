@@ -8,7 +8,7 @@ import hashlib
 import json
 from decimal import Decimal
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -44,7 +44,11 @@ class RiskLimits(BaseModel):
     blocking_flags: list[str] = Field(default_factory=lambda: ["news_halt"])
     # R15: дополнительные блокирующие `code` по режиму (ARCH §7.2: fusion_contrarian в MICRO_LIVE).
     blocking_flags_by_mode: dict[TradingMode, list[str]] = Field(
-        default_factory=lambda: {TradingMode.MICRO_LIVE: ["fusion_contrarian"]}
+        default_factory=lambda: {
+            TradingMode.MICRO_LIVE: ["fusion_contrarian"],
+            # 0.11.0: без человека в контуре — не мягче MICRO_LIVE.
+            TradingMode.FULL_AUTO: ["fusion_contrarian"],
+        }
     )
     # Мягкие флаги по `code`: sized_qty × risk_flag_multiplier, вердикт REDUCED.
     soft_flags: list[str] = Field(default_factory=lambda: ["news_mixed", "high_vol"])
@@ -212,6 +216,9 @@ class LLMSettings(BaseModel):
     # LLM-breaker (§5.4): доля отклонённых за час > порога при ≥ min_calls → ML-only.
     breaker_reject_ratio: float = Field(default=0.2, gt=0, le=1)
     breaker_min_calls: int = Field(default=10, ge=1)
+    # 0.11.0: асинхронный explain → decision_audit.explanation (FUSION SPEC §3.1, §6.2 п. 8).
+    explain_enabled: bool = True
+    explain_max_age_h: int = Field(default=24, gt=0)  # старше — не объясняем
     providers: list[LLMProvider] = Field(
         default_factory=lambda: [
             LLMProvider(
@@ -274,6 +281,13 @@ class ModeSettings(BaseModel):
     code_ttl_s: int = Field(default=120, gt=0)
     # FULL_AUTO: минимум исполненных сделок в MICRO_LIVE без срабатывания CB [ДОПУЩЕНИЕ ARCH §1.4].
     min_micro_trades: int = Field(default=20, ge=1)
+    # --- Promotion MICRO_LIVE → FULL_AUTO (0.11.0, CONFIG_VERSION 7; ARCH §1.4, §15 п. 10) ---
+    # Сверка исполнения с общей CostModel: минимум сигнальных FILLED-ордеров со сравнимой ценой.
+    min_compared_orders: int = Field(default=10, ge=1)
+    # Средний перекос издержек (проскальзывание + комиссия) live против CostModel, б.п.
+    max_cost_excess_bps: Decimal = Field(default=Decimal("15"), ge=0)
+    # FULL_AUTO без человека в контуре: перейти можно только с настроенным каналом алертов.
+    require_alerts: bool = True
 
 
 Importance = Literal["low", "medium", "high"]
@@ -372,6 +386,46 @@ class NewsSettings(BaseModel):
     rules: list[NewsRule] = Field(default_factory=_default_news_rules)
 
 
+class NotifySettings(BaseModel):
+    """Алерты (0.11.0, CONFIG_VERSION 7; ARCHITECTURE.md §2.11). Канал — только Telegram.
+
+    Токен и chat_id — `Settings.telegram_bot_token` / `telegram_chat_id` (.env).
+    """
+
+    enabled: bool = True
+    min_level: Literal["INFO", "WARN", "CRITICAL"] = "WARN"
+    max_attempts: int = Field(default=5, ge=1)
+    retry_base_s: int = Field(default=30, gt=0)  # backoff: base × 2^(attempt-1)
+    timeout_s: float = Field(default=10.0, gt=0)
+    telegram_api_base: str = "https://api.telegram.org"
+    batch: int = Field(default=20, ge=1)  # алертов за один проход диспетчера
+
+
+class StrategySpec(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunSettings(BaseModel):
+    """Минимальный оркестратор `augur run` (0.11.0, CONFIG_VERSION 7; ARCHITECTURE.md §2.12).
+
+    Последовательный цикл без EventBus и DbWriter. Интервалы — в секундах.
+    """
+
+    timeframe: str = "1h"
+    strategies: list[StrategySpec] = Field(default_factory=lambda: [StrategySpec(name="sma_cross")])
+    history_bars: int = Field(default=300, ge=10)  # окно баров для стратегий и Risk Gate
+    bar_close_delay_s: int = Field(default=5, ge=0)  # ждать после закрытия бара
+    tick_s: float = Field(default=5.0, gt=0)
+    snapshot_s: int = Field(default=60, gt=0)
+    llm_refresh_s: int = Field(default=900, gt=0)
+    explain_s: int = Field(default=60, gt=0)
+    alerts_s: int = Field(default=10, gt=0)
+    news: bool = True  # poll_news, если задан FINNHUB_API_KEY
+
+
 class Settings(BaseSettings):
     """Корневые настройки. Режим по умолчанию — PAPER."""
 
@@ -387,6 +441,8 @@ class Settings(BaseSettings):
     cb: CircuitBreakerSettings = CircuitBreakerSettings()
     mode: ModeSettings = ModeSettings()
     news: NewsSettings = NewsSettings()
+    notify: NotifySettings = NotifySettings()
+    run: RunSettings = RunSettings()
     # Секреты — только SecretStr, только из окружения
     ccxt_exchange: str = "binance"
     ccxt_api_key: SecretStr | None = None

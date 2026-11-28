@@ -20,6 +20,7 @@ dependencies = [
     "sqlalchemy>=2",
     "httpx",
     "python-dotenv",
+    "pyyaml>=6",  # макро-календарь (0.12.0); уже ставился транзитивно через uvicorn[standard]
 ]
 
 [project.optional-dependencies]

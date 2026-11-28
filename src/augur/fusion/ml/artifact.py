@@ -83,6 +83,11 @@ class Predictor:
         raw = np.asarray(self._booster.predict(x, num_threads=1), dtype=np.float64)
         return self._calibrator.apply(raw)
 
+    def feature_importance(self) -> dict[str, float]:
+        """Важность признаков (gain LightGBM) — для выбора топ-N в PSI-мониторинге (§5.4)."""
+        gains = self._booster.feature_importance(importance_type="gain")
+        return {name: float(g) for name, g in zip(self.feature_names, gains, strict=True)}
+
 
 def read_artifact(path: Path) -> Predictor:
     """Читает артефакт без проверки хэша — вызывать только из `ModelRegistry.load`."""

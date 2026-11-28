@@ -10,4 +10,4 @@ venv/
 .mypy_cache/
 dist/
 build/
-*.egg-info/
+*.egg-info/.env.fusion

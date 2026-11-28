@@ -1,18 +1,29 @@
-"""Входы LLM-контекста из БД: новости актива за окно и сводка цены (FUSION SPEC §3.1, §3.3).
+"""Входы LLM-контекста: новости актива за окно, сводка цены (БД) и события макро-календаря
+(YAML, 0.12.0) (FUSION SPEC §3.1, §3.3).
 
 В промпт не попадают ML-прогноз, технический сигнал, позиция и P&L (§4.4) — их здесь нет.
 """
 
 import math
 import sqlite3
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from augur.data.calendar import MacroCalendar
 from augur.data.models import timeframe_ms
 from augur.fusion.llm.sanitize import clean_text
 
-__all__ = ["NewsInput", "PriceSummary", "load_news_inputs", "load_price_summary"]
+__all__ = [
+    "EventInput",
+    "NewsInput",
+    "PriceSummary",
+    "imminent_event_ids",
+    "load_event_inputs",
+    "load_news_inputs",
+    "load_price_summary",
+]
 
 
 class NewsInput(BaseModel):
@@ -27,6 +38,58 @@ class NewsInput(BaseModel):
     @property
     def published_iso(self) -> str:
         return datetime.fromtimestamp(self.published_ts / 1000, tz=UTC).isoformat()
+
+
+class EventInput(BaseModel):
+    """Событие календаря в промпте (`<macro>`): id — evidence для `risk_flags`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    event_id: str
+    time_ms: int
+    time: str  # ISO UTC
+    impact: str
+    name: str
+
+
+def load_event_inputs(
+    calendar: MacroCalendar,
+    *,
+    asset: str,
+    as_of: int,
+    horizon_h: int,
+    lookback_min: int,
+    aliases: Mapping[str, str],
+) -> list[EventInput]:
+    """События, затронувшие актив, в [as_of − lookback, as_of + horizon], по времени."""
+    events = calendar.select(
+        start_ms=as_of - lookback_min * 60_000,
+        end_ms=as_of + horizon_h * 3_600_000,
+        symbol=asset,
+        aliases=aliases,
+    )
+    return [
+        EventInput(
+            event_id=e.id,
+            time_ms=e.time_ms,
+            time=e.time_iso,
+            impact=e.impact,
+            name=clean_text(e.name, 200),
+        )
+        for e in events
+    ]
+
+
+def imminent_event_ids(
+    events: list[EventInput], *, as_of: int, window_min: int, lookback_min: int
+) -> set[str]:
+    """id событий, для которых допустим `high_impact_event_imminent` (FUSION SPEC §5.1)."""
+    return {
+        e.event_id
+        for e in events
+        if e.impact == "high"
+        and as_of - lookback_min * 60_000 <= e.time_ms <= as_of + window_min * 60_000
+    }
 
 
 class PriceSummary(BaseModel):

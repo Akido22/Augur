@@ -3,8 +3,9 @@
 На один закрытый бар: бары из `ohlcv` → ML-инференс (запись в `ml_predictions`) → последний
 валидный LLM-контекст из `llm_contexts` (LLM не вызывается на критическом пути) → tech из
 `FusionRequest.context` → `fuse()` → `verify()`. Позиция и состояние CB читаются из БД
-только на чтение: Fusion не импортирует execution/risk. Исключение → Signal Engine уходит
-в ML-disabled (`FUSION_FALLBACK`), ничего не исполняется.
+только на чтение: Fusion не импортирует execution/risk. Breaker для `fuse()` открыт, если
+CB TRIPPED/KILLED или открыт Fusion-breaker актива (дрейф ML, `augur.fusion.breaker`, 0.12.0).
+Исключение → Signal Engine уходит в ML-disabled (`FUSION_FALLBACK`), ничего не исполняется.
 """
 
 import sqlite3
@@ -14,6 +15,7 @@ from typing import Any
 
 from augur.config.settings import FusionSettings
 from augur.data.models import timeframe_ms
+from augur.fusion.breaker import asset_breaker_open
 from augur.fusion.client import DECISION_AUDIT_REF_PREFIX, STUB_EXPLANATION_REF, FusionRequest
 from augur.fusion.contract import FusedSignal
 from augur.fusion.engine import TechSignal, fuse, verify
@@ -76,6 +78,7 @@ class LocalFusionClient:
         clock: Callable[[], int],
         position_side: Callable[[str], int] | None = None,
         breaker_open: Callable[[], bool] | None = None,
+        asset_breaker: Callable[[str], bool] | None = None,
     ) -> None:
         self._conn = conn
         self._cfg = settings
@@ -84,27 +87,38 @@ class LocalFusionClient:
         self._clock = clock
         self._position_side = position_side or (lambda s: read_position_side(conn, s))
         self._breaker_open = breaker_open or (lambda: read_breaker_open(conn))
+        self._asset_breaker = asset_breaker or (lambda a: asset_breaker_open(conn, a))
 
     async def get_fused_signal(self, request: FusionRequest) -> FusedSignal | None:
         now = self._clock()
         bar_ms = timeframe_ms(request.timeframe)
         ml_cfg = self._cfg.ml
-        bars = load_bar_arrays(
-            self._conn,
-            venue=ml_cfg.venue,
-            symbol=request.asset,
-            timeframe=request.timeframe,
-            until_close=request.timestamp,
-            limit=ml_cfg.features.window,
-        )
-        pred = (
-            self._ml.predict(request.asset, bars, request.timestamp) if bars is not None else None
-        )
-        llm = (
-            self._llm.latest(request.asset, now_ms=now, max_age_s=self._cfg.config.llm_max_age_s)
-            if self._llm is not None and self._cfg.llm.mode == "enabled"
-            else None
-        )
+        breaker_open = self._breaker_open() or self._asset_breaker(request.asset)
+        pred = None
+        llm = None
+        # §4.3 п. 1 идёт до п. 2: при открытом breaker ML не считается, fuse() даёт валидный
+        # HOLD (иначе verify() требует ссылку на прогноз, которого нет в source_breakdown).
+        if not breaker_open:
+            bars = load_bar_arrays(
+                self._conn,
+                venue=ml_cfg.venue,
+                symbol=request.asset,
+                timeframe=request.timeframe,
+                until_close=request.timestamp,
+                limit=ml_cfg.features.window,
+            )
+            pred = (
+                self._ml.predict(request.asset, bars, request.timestamp)
+                if bars is not None
+                else None
+            )
+            llm = (
+                self._llm.latest(
+                    request.asset, now_ms=now, max_age_s=self._cfg.config.llm_max_age_s
+                )
+                if self._llm is not None and self._cfg.llm.mode == "enabled"
+                else None
+            )
         decision_id = request.context.get("decision_audit_id")
         explanation_ref = (
             f"{DECISION_AUDIT_REF_PREFIX}{decision_id}"
@@ -117,7 +131,7 @@ class LocalFusionClient:
             tech_from_request(request),
             self._cfg.config,
             position_side=self._position_side(request.asset),
-            breaker_open=self._breaker_open(),
+            breaker_open=breaker_open,
             now_ms=now,
             bar_ms=bar_ms,
             asset=request.asset,

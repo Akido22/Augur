@@ -1,0 +1,37 @@
+# Макро-календарь Augur (0.12.0) — ПРИМЕР ФОРМАТА.
+# Скопируйте в config/macro_calendar.yaml (путь — MACRO__CALENDAR_PATH) и ведите вручную по
+# официальным источникам (BLS, Federal Reserve, ECB …). Даты ниже — иллюстрация, не расписание.
+#
+# Поля события:
+#   id      — [a-z0-9_]{1,64}, уникален; попадает в промпт LLM как evidence для risk_flags
+#   name    — название
+#   time    — ISO 8601 СО смещением (Z или +03:00); без пояса файл отклоняется
+#   impact  — low | medium | high; входы блокируются для macro.blocking_impacts (по умолчанию high)
+#   scope   — валюты/активы, которых касается событие; "*" — все инструменты.
+#             Символ BTC/USDT покрывает BTC, USDT и алиасы macro.currency_aliases (USDT → USD).
+#
+# Risk Gate (R15) отклоняет BUY/SELL за macro.blackout_before_min (15) минут до события и
+# macro.blackout_after_min (15) минут после; CLOSE/REDUCE и SL/TP не блокируются.
+# Проверка: augur macro validate; предстоящие события: augur macro list --symbol BTC/USDT
+
+events:
+  - id: evt_example_us_cpi
+    name: US CPI (example)
+    time: 2026-12-10T13:30:00Z
+    impact: high
+    scope: [USD]
+  - id: evt_example_fomc
+    name: FOMC rate decision (example)
+    time: 2026-12-16T19:00:00Z
+    impact: high
+    scope: ["*"]
+  - id: evt_example_ecb
+    name: ECB rate decision (example)
+    time: 2026-12-17T13:15:00Z
+    impact: high
+    scope: [EUR]
+  - id: evt_example_us_jobless
+    name: US initial jobless claims (example)
+    time: 2026-12-03T13:30:00Z
+    impact: medium
+    scope: [USD]

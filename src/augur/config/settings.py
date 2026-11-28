@@ -149,6 +149,29 @@ class MLPromotionSettings(BaseModel):
     min_staging_days: int = Field(default=14, ge=0)
 
 
+class MLDriftSettings(BaseModel):
+    """Nightly job и PSI-дрейф (FUSION SPEC §5.4, §6.4; 0.12.0, CONFIG_VERSION 8).
+
+    Эталон — признаки на барах диапазона обучения модели (`meta.train_range`), текущее окно —
+    закрытые бары за последние `window_bars` интервалов. Решение пользователя (0.12.0): Fusion
+    OPEN по активу, если СРЕДНЕЕ PSI по `top_features` важнейшим признакам (gain LightGBM)
+    > `psi_threshold`; PSI каждого признака и PSI confidence — только в отчёт (скользящие
+    признаки автокоррелированы: правило «любой из топ-10» даёт ложные OPEN). Сброс — человеком.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    psi_threshold: float = Field(default=0.25, gt=0)
+    top_features: int = Field(default=10, ge=1)
+    bins: int = Field(default=10, ge=2)
+    window_bars: int = Field(default=720, ge=10)  # 30 дней на 1h
+    min_reference: int = Field(default=200, ge=10)
+    reference_max: int = Field(default=3000, ge=10)  # прореживание эталона (равный шаг)
+    check_confidence: bool = True  # PSI confidence в отчёте (не триггер)
+    eval_window_days: int = Field(default=30, ge=1)  # окно hit rate / ECE / P&L
+    ece_bins: int = Field(default=10, ge=2)
+
+
 class MLSettings(BaseModel):
     """ML-слой `augur.fusion.ml` (FUSION SPEC §2, skill ml-training-inference)."""
 
@@ -160,6 +183,7 @@ class MLSettings(BaseModel):
     regime: MLRegimeSettings = MLRegimeSettings()
     train: MLTrainSettings = MLTrainSettings()
     promotion: MLPromotionSettings = MLPromotionSettings()
+    drift: MLDriftSettings = MLDriftSettings()
 
 
 class LLMPrice(BaseModel):
@@ -239,7 +263,9 @@ class FusionSettings(BaseModel):
     """
 
     enabled: bool = False
-    endpoint: str | None = None  # None → in-process LocalFusionClient (0.10.0)
+    # None → in-process LocalFusionClient (0.10.0); URL → HttpFusionClient к `augur fusion serve`
+    # (0.12.0), токен — `FUSION_API_TOKEN`.
+    endpoint: str | None = Field(default=None, pattern=r"^https?://[^\s]+$")
     config: FusionConfig = FusionConfig()
     ml: MLSettings = MLSettings()
     llm: LLMSettings = LLMSettings()
@@ -401,6 +427,31 @@ class NotifySettings(BaseModel):
     batch: int = Field(default=20, ge=1)  # алертов за один проход диспетчера
 
 
+_HIGH_ONLY: list[Importance] = ["high"]
+
+
+class MacroSettings(BaseModel):
+    """Макро-календарь (0.12.0, CONFIG_VERSION 8; FUSION SPEC §3.1, §3.4, ARCH §8.4).
+
+    Risk Gate блокирует входы (R15, флаг `high_impact_event_imminent`/high) по событиям с
+    `impact ∈ blocking_impacts` в окне [время − before, время + after]. LLM видит события
+    на `llm_horizon_h` вперёд; флаг `high_impact_event_imminent` допустим только для события
+    в окне `llm_imminent_min` (FUSION SPEC §5.1).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    calendar_path: str = "config/macro_calendar.yaml"
+    blackout_before_min: int = Field(default=15, ge=0)
+    blackout_after_min: int = Field(default=15, ge=0)
+    blocking_impacts: list[Importance] = Field(default_factory=lambda: _HIGH_ONLY.copy())
+    llm_horizon_h: int = Field(default=24, gt=0)
+    llm_imminent_min: int = Field(default=60, gt=0)
+    llm_pre_event_min: int = Field(default=30, ge=0)  # вызов LLM по событию за N мин (0 — нет)
+    # Валюта/актив символа → валюта области события: USDT → USD (BTC/USDT затрагивает US CPI).
+    currency_aliases: dict[str, str] = Field(default_factory=lambda: {"USDT": "USD", "USDC": "USD"})
+
+
 class StrategySpec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -424,6 +475,9 @@ class RunSettings(BaseModel):
     explain_s: int = Field(default=60, gt=0)
     alerts_s: int = Field(default=10, gt=0)
     news: bool = True  # poll_news, если задан FINNHUB_API_KEY
+    # 0.12.0: nightly job ML (FUSION SPEC §6.4) — раз в сутки UTC, не раньше этого часа.
+    nightly: bool = True
+    nightly_hour_utc: int = Field(default=2, ge=0, le=23)
 
 
 class Settings(BaseSettings):
@@ -442,6 +496,7 @@ class Settings(BaseSettings):
     mode: ModeSettings = ModeSettings()
     news: NewsSettings = NewsSettings()
     notify: NotifySettings = NotifySettings()
+    macro: MacroSettings = MacroSettings()
     run: RunSettings = RunSettings()
     # Секреты — только SecretStr, только из окружения
     ccxt_exchange: str = "binance"
@@ -469,6 +524,8 @@ class Settings(BaseSettings):
     llm_deepseek_key: SecretStr | None = None
     llm_openai_key: SecretStr | None = None
     api_auth_token: SecretStr  # обязателен для GUI/API
+    # 0.12.0: Bearer-токен между HttpFusionClient и `augur fusion serve` (отдельный от GUI).
+    fusion_api_token: SecretStr | None = None
 
 
 def load_settings() -> Settings:

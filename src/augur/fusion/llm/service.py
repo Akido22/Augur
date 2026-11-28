@@ -19,7 +19,7 @@ from augur.config.settings import LLMSettings
 from augur.db.audit import append_audit
 from augur.fusion.llm.calls import CallLog, CallRunner
 from augur.fusion.llm.client import LLMClient
-from augur.fusion.llm.inputs import NewsInput, PriceSummary
+from augur.fusion.llm.inputs import EventInput, NewsInput, PriceSummary
 from augur.fusion.llm.prompts import PromptTemplate, PromptVersionConflict
 from augur.fusion.llm.schema import LLMContext, LLMContextResult
 from augur.fusion.llm.validate import aggregate_samples, parse_context
@@ -81,7 +81,13 @@ class LLMContextService:
         news: list[NewsInput],
         price: PriceSummary,
         event_driven: bool = False,
+        events: list[EventInput] | None = None,
+        imminent_ids: set[str] | None = None,
     ) -> LLMContextResult:
+        """`events` — события календаря (0.12.0): их id — evidence; `imminent_ids` — события,
+        для которых допустим `high_impact_event_imminent` (FUSION SPEC §5.1)."""
+        events = list(events or [])
+        imminent = set(imminent_ids or set()) & {e.event_id for e in events}
         group = new_ulid(self._clock())
         if self._cfg.mode != "enabled":
             return self._finish(asset, as_of, group, "fallback_ml_only", None, [], "llm_disabled")
@@ -107,9 +113,10 @@ class LLMContextService:
 
         as_of_iso = _iso(as_of)
         as_of_dt = datetime.fromtimestamp(as_of / 1000, tz=UTC)
-        input_ids = {n.news_id for n in news}
-        # Экономия (§5.2): без новостей — один сэмпл; иначе N сэмплов с разным порядком новостей.
-        n_samples = self._cfg.variance.samples if news else 1
+        input_ids = {n.news_id for n in news} | {e.event_id for e in events}
+        # Экономия (§5.2): без новостей и high-impact события — один сэмпл; иначе N сэмплов
+        # с разным порядком новостей («3 сэмпла — всегда при high-impact событии»).
+        n_samples = self._cfg.variance.samples if news or imminent else 1
         call_ids: list[int] = []
         valid: list[LLMContext] = []
         for i in range(n_samples):
@@ -118,7 +125,7 @@ class LLMContextService:
                 asset=asset,
                 as_of_iso=as_of_iso,
                 news=[{**n.model_dump(), "published_iso": n.published_iso} for n in order],
-                events=[],
+                events=[e.model_dump() for e in events],
                 window_h=price.window_h,
                 ret=price.ret,
                 vol_z=price.vol_z,
@@ -132,7 +139,9 @@ class LLMContextService:
                 i,
                 temperature if n_samples > 1 else 0.0,
             )
-            ctx = await self._sample(meta, system, user, asset, as_of_dt, input_ids, call_ids)
+            ctx = await self._sample(
+                meta, system, user, asset, as_of_dt, input_ids, imminent, call_ids
+            )
             if ctx is not None:
                 valid.append(ctx)
         if (
@@ -158,6 +167,7 @@ class LLMContextService:
         asset: str,
         as_of: datetime,
         input_ids: set[str],
+        imminent: set[str],
         call_ids: list[int],
     ) -> LLMContext | None:
         prompt_user = user
@@ -172,7 +182,7 @@ class LLMContextService:
                 asset=asset,
                 as_of=as_of,
                 input_ids=input_ids,
-                event_ids=set(),
+                event_ids=imminent,
                 has_inputs=bool(input_ids),
                 cfg=self._cfg,
             )

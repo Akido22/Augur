@@ -66,6 +66,11 @@ augur llm explain [--decision <id>] [--limit N]  # LLM explain → decision_audi
 augur alerts dispatch | list [--status] | test   # алерты из audit_log → Telegram
 augur run [--max-ticks N]                    # оркестратор: бар → сигнал → Risk Gate → ордер
 augur fusion replay <id> [--json]            # fuse() на сохранённых входах, сверка с записью
+augur macro validate | list [--symbol S] [--days N]   # макро-календарь YAML; окна блокировки входов
+augur ml nightly [--symbol S]                # nightly: realized_return, hit rate/ECE, PSI → Fusion OPEN
+augur fusion breaker list | reset --symbol S --approved-by <имя> --confirm   # Fusion-breaker актива
+augur fusion serve [--port 8100] [--env-file .env.fusion]   # Fusion как HTTP-сервис (без ключей биржи)
+augur fusion health                          # проверка FUSION__ENDPOINT и api_version
 ```
 
 Перед коммитом: `ruff check .` и `pytest` должны проходить.

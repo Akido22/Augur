@@ -216,7 +216,9 @@ def _assemble(
     pipeline = TradingPipeline(
         conn,
         gate=RiskGate(settings.risk),
-        contexts=RiskContextBuilder(conn, configured_mode=settings.trading_mode),
+        contexts=RiskContextBuilder(
+            conn, configured_mode=settings.trading_mode, macro=settings.macro
+        ),
         audit=DecisionAuditWriter(conn, app_version=app_version, config_hash=cfg_hash),
         orders=orders,
         breaker=breaker,

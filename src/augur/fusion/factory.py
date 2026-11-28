@@ -1,22 +1,31 @@
 """Сборка `FusionClient` из настроек (composition root Fusion, ARCH §5.4).
 
 - `fusion.enabled=false` → `StubFusionClient` (Signal Engine всё равно идёт по классике).
-- `enabled=true`, `endpoint` задан → внешний сервис (`HttpFusionClient` — 0.12.0).
+- `enabled=true`, `endpoint` задан → внешний сервис `augur fusion serve` (`HttpFusionClient`,
+  0.12.0; токен `FUSION_API_TOKEN` обязателен).
 - `enabled=true` без `endpoint` → `LocalFusionClient` (0.10.0).
 LLM-компонентам передаются только LLM-настройки и ключи `LLM_*_KEY` (FUSION SPEC §3.6):
 `Settings` с ключами биржи дальше этой функции не уходит.
 """
 
+import logging
 import sqlite3
 from collections.abc import Callable, Mapping
 
 from pydantic import SecretStr
 
 from augur.config.settings import Settings
+from augur.data.calendar import CalendarError, load_calendar
 from augur.fusion.client import FusionClient, StubFusionClient
 from augur.fusion.llm.client import LLMClient, OpenAICompatClient
 from augur.fusion.llm.explain import ExplainService
-from augur.fusion.llm.inputs import load_news_inputs, load_price_summary
+from augur.fusion.llm.inputs import (
+    EventInput,
+    imminent_event_ids,
+    load_event_inputs,
+    load_news_inputs,
+    load_price_summary,
+)
 from augur.fusion.llm.schema import LLMContextResult
 from augur.fusion.llm.service import LLMContextService
 from augur.fusion.local import LocalFusionClient
@@ -28,8 +37,11 @@ __all__ = [
     "build_fusion_client",
     "build_llm_context_service",
     "llm_keys",
+    "macro_event_inputs",
     "refresh_llm_context",
 ]
+
+log = logging.getLogger(__name__)
 
 
 def llm_keys(settings: Settings) -> Mapping[str, SecretStr | None]:
@@ -69,6 +81,25 @@ def build_explain_service(
     )
 
 
+def macro_event_inputs(settings: Settings, *, symbol: str, as_of: int) -> list[EventInput]:
+    """События календаря для промпта (0.12.0). Календарь не читается → [] + ERROR в лог:
+    LLM не сможет обосновать `high_impact_event_imminent`, а Risk Gate закроет входы сам."""
+    m = settings.macro
+    try:
+        cal = load_calendar(m.calendar_path)
+    except CalendarError as e:
+        log.error("macro calendar unavailable for LLM context: %s", e)
+        return []
+    return load_event_inputs(
+        cal,
+        asset=symbol,
+        as_of=as_of,
+        horizon_h=m.llm_horizon_h,
+        lookback_min=m.blackout_after_min,
+        aliases=m.currency_aliases,
+    )
+
+
 async def refresh_llm_context(
     conn: sqlite3.Connection,
     settings: Settings,
@@ -79,7 +110,8 @@ async def refresh_llm_context(
     event_driven: bool = False,
     client: LLMClient | None = None,
 ) -> LLMContextResult:
-    """Один цикл LLM-контекста по активу: новости + сводка цены → `llm_contexts`.
+    """Один цикл LLM-контекста по активу: новости + события календаря + сводка цены →
+    `llm_contexts`.
 
     Общий для `augur llm refresh` и оркестратора (`augur run`).
     """
@@ -101,8 +133,23 @@ async def refresh_llm_context(
         as_of=now,
         window_h=lcfg.news_window_h,
     )
+    events = macro_event_inputs(settings, symbol=symbol, as_of=now)
+    imminent = imminent_event_ids(
+        events,
+        as_of=now,
+        window_min=settings.macro.llm_imminent_min,
+        lookback_min=settings.macro.blackout_after_min,
+    )
     svc = build_llm_context_service(conn, settings, clock=clock, client=client)
-    return await svc.refresh(symbol, as_of=now, news=news, price=price, event_driven=event_driven)
+    return await svc.refresh(
+        symbol,
+        as_of=now,
+        news=news,
+        price=price,
+        event_driven=event_driven,
+        events=events,
+        imminent_ids=imminent,
+    )
 
 
 def build_fusion_client(
@@ -116,7 +163,13 @@ def build_fusion_client(
     if not fcfg.enabled:
         return StubFusionClient()
     if fcfg.endpoint is not None:
-        raise NotImplementedError("HttpFusionClient is not implemented; unset FUSION__ENDPOINT")
+        from augur.fusion.http import HttpFusionClient
+
+        if settings.fusion_api_token is None:
+            raise ValueError("FUSION__ENDPOINT is set but FUSION_API_TOKEN is missing")
+        return HttpFusionClient(
+            fcfg.endpoint, token=settings.fusion_api_token, timeout_ms=fcfg.timeout_ms
+        )
     registry = ModelRegistry(conn, clock=clock)
     ml = MLService(conn, registry, fcfg.ml, clock=clock)
     llm = (

@@ -8,6 +8,6 @@ CONFIG_VERSION — формат конфига, который читает эт
 
 DB_SCHEMA_VERSION: int = 8
 API_VERSION: str = "1.0"
-CONFIG_VERSION: int = 7
+CONFIG_VERSION: int = 8
 
 __all__ = ["DB_SCHEMA_VERSION", "API_VERSION", "CONFIG_VERSION"]

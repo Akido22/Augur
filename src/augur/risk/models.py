@@ -96,6 +96,11 @@ class RiskContext(BaseModel):
     # Активные флаги add_risk_flag по символу сигнала: в R15 и soft-sizing вместе с
     # `sig.risk_flags` (только ужесточают).
     news_flags: tuple[RiskFlag, ...] = ()
+    # --- макро-календарь (0.12.0; FUSION SPEC §3.4, ARCH §8.4) ---
+    # `high_impact_event_imminent`/high в окне события или `macro_calendar_invalid`/high, если
+    # календарь не читается (fail-closed). В R15 вместе с `sig.risk_flags`.
+    macro_flags: tuple[RiskFlag, ...] = ()
+    macro_event_ids: tuple[str, ...] = ()  # события, давшие флаг (для аудита)
     signal_strategies: frozenset[str] = frozenset()  # strategy_version родителей сигнала
 
     @field_validator("now")

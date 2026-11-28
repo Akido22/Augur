@@ -3,11 +3,17 @@
 Новостной контур (0.8.0): активные строки `news_reactions` (не сняты, не истекли на `now`) →
 `news_paused_symbols` / `news_paused_strategies` (R16) и `news_flags` символа (R15, soft).
 
+Макро-календарь (0.12.0): события из `macro.calendar_path` с `impact ∈ blocking_impacts`,
+затронувшие символ, в окне [время − before, время + after] → `macro_flags`
+(`high_impact_event_imminent`/high, R15 блокирует вход). Календарь не читается →
+`macro_calendar_invalid`/high (fail-closed). CLOSE/REDUCE R15 не блокирует.
+
 Gate сам не ходит в БД/сеть; этот модуль — единственное место, где контекст собирается.
 Только чтение. Рыночная часть (`MarketSnapshot`) приходит от адаптера через
 `market_snapshot()`; z-оценка волатильности — `return_zscore()` по закрытым барам.
 """
 
+import logging
 import math
 import sqlite3
 from collections.abc import Sequence
@@ -17,7 +23,8 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict
 
 from augur.adapters.base import InstrumentSpec, MarketAdapter, MarketStatus
-from augur.config.settings import TradingMode
+from augur.config.settings import MacroSettings, TradingMode
+from augur.data.calendar import CalendarError, load_calendar
 from augur.data.models import Bar
 from augur.fusion.contract import RiskFlag
 from augur.risk.gate import intent_key
@@ -40,6 +47,9 @@ MODE_ORDER: tuple[TradingMode, ...] = (
     TradingMode.FULL_AUTO,
 )
 _ACTIVE_ORDER_STATES = ("PENDING", "SUBMITTED", "PARTIAL", "UNKNOWN")
+MACRO_FLAG = "high_impact_event_imminent"
+MACRO_INVALID_FLAG = "macro_calendar_invalid"
+log = logging.getLogger(__name__)
 
 
 class MarketSnapshot(BaseModel):
@@ -112,11 +122,19 @@ class RiskContextBuilder:
         conn: соединение с применёнными миграциями (0004+).
         configured_mode: `settings.trading_mode` — потолок режима (ARCH §7.1: при старте
             режим из `mode_state`, но не выше конфига).
+        macro: настройки макро-календаря; None — календарь не учитывается.
     """
 
-    def __init__(self, conn: sqlite3.Connection, *, configured_mode: TradingMode) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        configured_mode: TradingMode,
+        macro: MacroSettings | None = None,
+    ) -> None:
         self._conn = conn
         self._configured = configured_mode
+        self._macro = macro
 
     def current_mode(self) -> TradingMode:
         row = self._conn.execute("SELECT mode FROM mode_state WHERE id = 1").fetchone()
@@ -211,6 +229,30 @@ class RiskContextBuilder:
                     flags.append(flag)
         return frozenset(symbols), frozenset(paused), tuple(flags)
 
+    def macro_effects(
+        self, symbol: str, now: datetime
+    ) -> tuple[tuple[RiskFlag, ...], tuple[str, ...]]:
+        """(macro-флаги, id событий) для символа на `now` (FUSION SPEC §3.4, ARCH §8.4)."""
+        m = self._macro
+        if m is None:
+            return (), ()
+        try:
+            cal = load_calendar(m.calendar_path)
+        except CalendarError as e:
+            log.error("macro calendar unavailable, entries blocked: %s", e)
+            return (RiskFlag(code=MACRO_INVALID_FLAG, severity="high"),), ()
+        now_ms = int(now.timestamp() * 1000)
+        events = cal.select(
+            start_ms=now_ms - m.blackout_after_min * 60_000,
+            end_ms=now_ms + m.blackout_before_min * 60_000,
+            symbol=symbol,
+            aliases=m.currency_aliases,
+            impacts=m.blocking_impacts,
+        )
+        if not events:
+            return (), ()
+        return (RiskFlag(code=MACRO_FLAG, severity="high"),), tuple(e.id for e in events)
+
     def build(
         self,
         sig: SignalReady,
@@ -223,6 +265,7 @@ class RiskContextBuilder:
         mode = self.current_mode()
         pnl, equity_sod = self.day_pnl(mode)
         db_symbols, db_strategies, news_flags = self.news_effects(sig, now)
+        macro_flags, macro_ids = self.macro_effects(sig.symbol, now)
         return RiskContext(
             now=now,
             mode=mode,
@@ -236,5 +279,7 @@ class RiskContextBuilder:
             news_paused_symbols=news_paused_symbols | db_symbols,
             news_paused_strategies=news_paused_strategies | db_strategies,
             news_flags=news_flags,
+            macro_flags=macro_flags,
+            macro_event_ids=macro_ids,
             signal_strategies=self.signal_strategies(sig),
         )

@@ -1019,8 +1019,18 @@ class StubFusionClient:
     expires_at = timestamp + половина длительности бара."""
 
 class HttpFusionClient:
-    """Клиент к внешнему Fusion-сервису (в 0.4.0 не реализован; реализация сервиса — [→ FUSION SPEC])."""
+    """Клиент к внешнему Fusion-сервису `augur fusion serve` (0.12.0, `augur.fusion.http`)."""
 ```
+
+**HTTP-контракт (0.12.0).** `HttpFusionClient` → `augur fusion serve`: `POST {endpoint}/v1/fuse`
+(тело — `FusionRequest` п. 5.2; заголовки `Authorization: Bearer <FUSION_API_TOKEN>`,
+`X-Augur-Api-Version: <API_VERSION>`) → 200 `FusedSignal` (FUSION SPEC §4.6, без изменений) | 204
+сигнала нет | 401 | 409 другой MAJOR `api_version` | 422 невалидный запрос | 503 сбой Fusion;
+`GET {endpoint}/v1/health`. Клиент не повторяет запрос: сбой → `FusionUnavailable` → V6
+(`FUSION_FALLBACK`); ответ 200 проходит V1–V5 как обычно. Сервис идемпотентен по
+`idempotency_key` (LRU в процессе + детерминированный `signal_id`), держит ключи LLM и
+ML-артефакты, ведёт фоновые задачи Fusion и не стартует при ключах биржи в окружении (FUSION SPEC
+§3.6). При `FUSION__ENDPOINT` оркестратор задачи Fusion не выполняет.
 
 > `StubFusionClient` возвращает `HOLD` (или `NO_SIGNAL` без технического сигнала), а не копию классического сигнала, чтобы в MVP итоговое решение явно шло через ветку `classic_fallback` и было видно в аудите. `[ДОПУЩЕНИЕ]`. Альтернатива из ТЗ — «neutral fused_signal» — это именно HOLD.
 
@@ -1456,6 +1466,8 @@ rules:
 
 Действия: `pause_symbol`, `pause_strategy`, `add_risk_flag`, `reduce_risk(multiplier)`, `notify`. Каждое применение → `audit_log: NEWS_REACTION`. Реакции могут только **ужесточать** риск.
 
+**Реализация 0.12.0 (`macro_event_blackout`).** Не новостное правило, а детерминированный макро-календарь `config/macro_calendar.yaml` (`augur.data.calendar`, пример — `config/macro_calendar.example.yaml`): `RiskContextBuilder` для событий с `impact ∈ macro.blocking_impacts`, затронувших символ (`scope` + `macro.currency_aliases`), в окне [−`blackout_before_min`, +`blackout_after_min`] добавляет `RiskContext.macro_flags = {high_impact_event_imminent, high}` → R15 отклоняет вход (CLOSE/REDUCE не блокируются). Невалидный календарь → `macro_calendar_invalid`/high (fail-closed). `scope: affected_currencies` реализован через `scope` события.
+
 **Реализация 0.8.0.** Правила задаются в `Settings.news.rules` (`NEWS__RULES`, JSON), а не в `config/news_rules.yaml` — без новой зависимости. Поддержаны `pause_symbol`, `pause_strategy`, `add_risk_flag`, `notify`. `reduce_risk(multiplier)` не реализован: уменьшение размера — через `add_risk_flag` с кодом из `risk.soft_flags`. `macro_event_blackout` ждёт экономического календаря. Эффекты хранятся в `news_reactions` со сроком `published_ts + duration_min` и читаются `RiskContextBuilder`: паузы → R16 (`news_paused_symbols` / `news_paused_strategies`, пауза по имени стратегии покрывает все её версии), флаги символа → `RiskContext.news_flags`, которые учитываются в R15 и soft-sizing вместе с `sig.risk_flags`. Новость без символов вызывает только `notify`. `notify` пока пишет аудит и лог: модуля уведомлений нет. Снятие человеком: `augur news lift <id> --confirm` → `NEWS_REACTION_LIFTED`. Источник в 0.8.0 — только Finnhub (ключ только в заголовке `X-Finnhub-Token`). Скорер — `RuleBasedScorer` (`rule:v1`), LLM-скорер — 0.10.0.
 
 ---
@@ -1579,7 +1591,7 @@ augur/
 │   ├── strategies/    base.py, registry.py, indicators.py, sma_cross.py, ...
 │   ├── backtest/      engine.py, costs.py, metrics.py, walk_forward.py
 │   ├── signals/       engine.py, combine.py, events.py
-│   ├── fusion/        contract.py, client.py (Protocol + HttpFusionClient), stub.py   # ТОЛЬКО контракт + заглушка
+│   ├── fusion/        contract.py, client.py (Protocol + Stub), http.py (HttpFusionClient), server.py   # контракт + клиенты
 │   ├── risk/          gate.py, checks/, sizing.py, post_trade.py
 │   ├── execution/     modes.py, order_manager.py, state_machine.py, idempotency.py,
 │   │                  circuit_breaker.py, kill_switch.py, reconciler.py, positions.py
@@ -1599,7 +1611,7 @@ augur/
     └── e2e/           # сценарии: CB trip, kill switch, duplicate signal, reconnect
 ```
 
-> `src/augur/fusion/` — **тонкий интерфейсный модуль**: только контракт `FusedSignal`/`FusionRequest`, `FusionClient` Protocol, `HttpFusionClient` и `StubFusionClient`. Реализация — по `ML_LLM_FUSION_SPEC.md` в подпакетах `augur.fusion` (с 0.10.0): ML-слой — `augur.fusion.ml` (skill `ml-training-inference`), LLM-слой — `augur.fusion.llm` (skill `llm-output-validation`), `fuse()` — `augur.fusion.engine`, in-process клиент — `augur.fusion.local.LocalFusionClient`, сборка — `augur.fusion.factory`. Эти подмодули импортируются явно; `HttpFusionClient` пока не реализован. Подпакеты подчиняются тому же контракту «Fusion cannot reach execution»; ML/LLM-библиотеки импортируются только внутри `augur.fusion`.
+> `src/augur/fusion/` — **тонкий интерфейсный модуль**: только контракт `FusedSignal`/`FusionRequest`, `FusionClient` Protocol, `HttpFusionClient` и `StubFusionClient`. Реализация — по `ML_LLM_FUSION_SPEC.md` в подпакетах `augur.fusion` (с 0.10.0): ML-слой — `augur.fusion.ml` (skill `ml-training-inference`), LLM-слой — `augur.fusion.llm` (skill `llm-output-validation`), `fuse()` — `augur.fusion.engine`, in-process клиент — `augur.fusion.local.LocalFusionClient`, сборка — `augur.fusion.factory`. Эти подмодули импортируются явно. С 0.12.0: `HttpFusionClient` (`augur.fusion.http`), сервис `augur fusion serve` (`augur.fusion.server`), фоновые задачи `augur.fusion.jobs`, Fusion-breaker по активу `augur.fusion.breaker`, nightly/PSI `augur.fusion.ml.monitor`. Подпакеты подчиняются тому же контракту «Fusion cannot reach execution»; ML/LLM-библиотеки импортируются только внутри `augur.fusion`.
 
 Контракты `import-linter` (фрагмент):
 
@@ -1800,7 +1812,7 @@ description: Use BEFORE creating or changing anything in src/augur/risk or src/a
 | 9 | GUI/CLI | полный CLI, GUI мониторинга, цепочка решения по ордеру; GUI-страницы |
 | 10 | ML+LLM | реальная реализация Fusion: ML-модель, LLM-контекст и LLM-скорер новостей (`SentimentScorer` в fusion-модуле), реестр моделей, replay-тест |
 | 11 | FULL_AUTO | promotion-критерии (сделки без CB, сверка с `CostModel`, алерты, утверждающий), автоисполнение FULL_AUTO, алерты Telegram из `audit_log`, LLM `explain`, минимальный `augur run`, `docs/RUNBOOK_INCIDENTS.md` |
-| 12 | Хвосты ML+LLM | макро-календарь из YAML, nightly job / PSI-дрейф, `HttpFusionClient` + `augur fusion serve` |
+| 12 | Хвосты ML+LLM | макро-календарь из YAML (`augur.data.calendar`; Risk Gate R15 блокирует входы в окне high-impact события, LLM получает события как evidence), nightly job / PSI-дрейф (среднее PSI топ-10 признаков > 0.25 → Fusion OPEN по активу, сброс человеком), `HttpFusionClient` + `augur fusion serve` (HTTP-контракт — §5.4); `config_version` 8, `db_schema` без изменений |
 
 Нумерация этапов совпадает с MINOR-версиями `VERSIONING.md` §4 (этап N = `0.N.0`). Установка внешних skills (с пином), hooks, MT5-bridge и Alpaca-исполнение — по мере необходимости, вне этой нумерации.
 
@@ -1814,7 +1826,7 @@ GUI и CLI развиваются параллельно с этапа 3 (мин
 - Risk Gate: полный набор чеков, применимых к крипте.
 - GUI: Dashboard, Positions, Auto-Trading Control (kill switch); CLI: `run`, `backtest`, `signals`, `kill-switch`, `config validate`.
 
-ML- и LLM-этапы реализуются по `ML_LLM_FUSION_SPEC.md` и подключаются без изменений Signal Engine: с 0.10.0 — in-process `LocalFusionClient` (`FUSION__ENABLED=true` без `FUSION__ENDPOINT`); внешний сервис с `HttpFusionClient` (`FUSION__ENDPOINT=...`) — позже.
+ML- и LLM-этапы реализуются по `ML_LLM_FUSION_SPEC.md` и подключаются без изменений Signal Engine: с 0.10.0 — in-process `LocalFusionClient` (`FUSION__ENABLED=true` без `FUSION__ENDPOINT`); с 0.12.0 — внешний сервис `augur fusion serve` и `HttpFusionClient` (`FUSION__ENDPOINT=...`, `FUSION_API_TOKEN`).
 
 ---
 

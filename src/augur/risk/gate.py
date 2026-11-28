@@ -6,7 +6,9 @@
 - Вердикт — чистая функция `(SignalReady, RiskContext, RiskLimits)`: без I/O и системных часов
   (время — `ctx.now`). Нет данных → чек не проходит (fail-closed).
 - `risk_flags` (`{code, severity}`) только ужесточают: R15 блокирует вход, soft-флаги режут объём.
-  Флаги — `sig.risk_flags` ∪ `ctx.news_flags` (реакции новостного контура, ARCH §8.4).
+  Флаги — `sig.risk_flags` ∪ `ctx.news_flags` (реакции новостного контура, ARCH §8.4)
+  ∪ `ctx.macro_flags` (макро-календарь, 0.12.0: вход в окне high-impact события блокируется
+  детерминированно, без LLM — FUSION SPEC §3.4).
 
 Действия, снижающие риск (`CLOSE`, `REDUCE`), не блокируются чеками, защищающими от НОВОГО
 риска [ДОПУЩЕНИЕ, skill auto-trade-risk-gate: «CB останавливает только новые входы»]:
@@ -62,8 +64,8 @@ _NO_DATA = "no data"
 
 
 def _flags(sig: SignalReady, ctx: RiskContext) -> list[RiskFlag]:
-    """Флаги сигнала и активные news-флаги символа (дубликаты не мешают: работаем по множествам)."""
-    return [*sig.risk_flags, *ctx.news_flags]
+    """Флаги сигнала, news- и macro-флаги символа (дубликаты не мешают: работаем по множествам)."""
+    return [*sig.risk_flags, *ctx.news_flags, *ctx.macro_flags]
 
 
 def order_side(sig: SignalReady, position_qty: Decimal) -> str | None:
@@ -448,6 +450,8 @@ class RiskGate:
             problems.append(f"blocking flags: {','.join(hits)}")
         if high:
             problems.append(f"high severity: {','.join(high)}")
+        if ctx.macro_event_ids:
+            problems.append(f"macro events: {','.join(ctx.macro_event_ids)}")
         return CheckResult(
             name="risk_flags",
             passed=not problems,

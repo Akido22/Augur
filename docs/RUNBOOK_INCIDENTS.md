@@ -1,4 +1,4 @@
-# Runbook: FULL_AUTO и инциденты (0.11.0)
+# Runbook: FULL_AUTO и инциденты (0.11.0, дополнено в 0.12.0)
 
 Переход MICRO_LIVE → FULL_AUTO и действия при инцидентах (ARCHITECTURE.md §1.4, §7.4, §14 этап 11).
 Выполняет человек. Агент не вводит ключи, не вводит коды подтверждения и не включает реальные деньги.
@@ -115,6 +115,23 @@ NOTIFY__MIN_LEVEL=WARN   # INFO | WARN | CRITICAL
 
 `ResilientAdapter` повторяет вызовы, серия ошибок → CB `adapter_errors`. Ордер с неизвестным
 статусом — `UNKNOWN`, R5 блокирует символ до сверки. После восстановления: `augur reconcile`.
+
+### 2.7. ML_DRIFT_DETECTED / FUSION_BREAKER_OPENED (0.12.0)
+
+Nightly job нашёл дрейф признаков (среднее PSI топ-10 > `FUSION__ML__DRIFT__PSI_THRESHOLD`):
+Fusion по активу отдаёт только HOLD, новых входов нет; открытые позиции закрываются SL/TP.
+`augur fusion breaker list` — какие активы и модель; `augur ml nightly --symbol S` — PSI по
+признакам (`DRIFT` — выше порога), hit rate, ECE. Дальше: `augur ml train --symbol S` →
+`augur ml promote … --to staging/production` по обычным правилам (shadow, ECE, Sharpe), затем
+`augur fusion breaker reset --symbol S --approved-by <имя> --reason "<итог разбора>" --confirm`.
+Автосброса нет.
+
+### 2.8. MACRO_CALENDAR_MISSING / MACRO_CALENDAR_INVALID (0.12.0)
+
+`MISSING` — нет `config/macro_calendar.yaml`: входы вокруг CPI/FOMC/NFP не блокируются.
+Скопируйте `config/macro_calendar.example.yaml`, заполните по официальным источникам,
+`augur macro validate`. `INVALID` — файл не проходит схему: Risk Gate закрывает ВСЕ входы
+(`macro_calendar_invalid`), пока файл не исправлен (правка подхватывается без рестарта).
 
 ## 3. Откат версии
 

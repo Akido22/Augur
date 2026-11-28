@@ -2,6 +2,8 @@
 
 import sqlite3
 from collections.abc import Sequence
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, SecretStr
@@ -211,3 +213,53 @@ async def test_job_failure_is_audited_once(db: sqlite3.Connection) -> None:
     payload = db.execute("SELECT payload_json FROM audit_log WHERE event='RUN_ERROR'").fetchone()
     assert "RuntimeError" in payload[0]
     await r.stop(reason="test")
+
+
+async def test_calendar_warning_and_blackout_blocks_entry(
+    db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """0.12.0: нет календаря → MACRO_CALENDAR_MISSING; событие в окне → R15 отклоняет BUY."""
+    from augur.config.settings import MacroSettings
+
+    clock = Clock()
+    r, _, _ = _runner(db, make_settings(run=RUN), clock)
+    await r.run_forever(max_ticks=1)
+    assert _events(db, "MACRO_CALENDAR_MISSING") == 1
+
+    when = datetime.fromtimestamp((clock.now + H + 5 * 60_000) / 1000, tz=UTC).isoformat()
+    cal = tmp_path / "cal.yaml"
+    cal.write_text(
+        f"events:\n  - id: evt_cpi\n    name: CPI\n    time: '{when}'\n    impact: high\n"
+        "    scope: ['*']\n",
+        encoding="utf-8",
+    )
+    clock.advance(H)
+    cfg = make_settings(run=RUN, macro=MacroSettings(calendar_path=str(cal)))
+    r2, _, _ = _runner(db, cfg, clock)
+    await r2.run_forever(max_ticks=1)
+    assert _events(db, "MACRO_CALENDAR_MISSING") == 1
+    last = db.execute(
+        "SELECT risk_verdict, risk_reason FROM decision_audit ORDER BY created_at DESC, id DESC"
+    ).fetchone()
+    assert last[0] == "REJECTED" and "evt_cpi" in last[1]
+
+
+async def test_fusion_jobs_skipped_with_external_endpoint(db: sqlite3.Connection) -> None:
+    """С FUSION__ENDPOINT задачи Fusion (nightly, LLM) ведёт `augur fusion serve`."""
+    from augur.config.settings import FusionSettings
+    from augur.fusion.client import StubFusionClient
+
+    clock = Clock(NOW_MS + 30 * H)
+    clock.now = clock.now - clock.now % (24 * H) + 3 * H + 30 * H  # после nightly_hour_utc
+    local = make_settings(run=RUN, fusion=FusionSettings(enabled=True))
+    r, _, _ = _runner(db, local, clock, fusion_client=StubFusionClient())
+    await r.run_forever(max_ticks=1)
+    assert _events(db, "ML_MONITOR_REPORT") == 1  # in-process: nightly здесь
+
+    clock.advance(24 * H)
+    remote = make_settings(
+        run=RUN, fusion=FusionSettings(enabled=True, endpoint="http://127.0.0.1:8100")
+    )
+    r2, _, _ = _runner(db, remote, clock, fusion_client=StubFusionClient())
+    await r2.run_forever(max_ticks=1)
+    assert _events(db, "ML_MONITOR_REPORT") == 1

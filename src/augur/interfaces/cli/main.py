@@ -1017,7 +1017,9 @@ ml_app = typer.Typer(help="ML-модели: обучение, реестр, пр
 app.add_typer(ml_app, name="ml")
 llm_app = typer.Typer(help="LLM-контекст: обновление и расход.", no_args_is_help=True)
 app.add_typer(llm_app, name="llm")
-fusion_app = typer.Typer(help="Fusion: воспроизведение решений.", no_args_is_help=True)
+fusion_app = typer.Typer(
+    help="Fusion: replay, HTTP-сервис, breaker по активу.", no_args_is_help=True
+)
 app.add_typer(fusion_app, name="fusion")
 
 SymbolOpt = typer.Option(..., "--symbol", help="Инструмент, напр. BTC/USDT.")
@@ -1418,3 +1420,307 @@ def run(
         typer.echo("stopped")
     finally:
         conn.close()
+
+
+# --- 0.12.0: макро-календарь, nightly / PSI, Fusion-breaker, `fusion serve` ---------------
+
+macro_app = typer.Typer(help="Макро-календарь (YAML): просмотр и проверка.", no_args_is_help=True)
+app.add_typer(macro_app, name="macro")
+breaker_app = typer.Typer(help="Fusion-breaker по активу (дрейф ML).", no_args_is_help=True)
+fusion_app.add_typer(breaker_app, name="breaker")
+
+_EXCHANGE_SECRETS = (
+    "ccxt_api_key",
+    "ccxt_api_secret",
+    "mt5_password",
+    "alpaca_api_key",
+    "alpaca_api_secret",
+)
+
+
+def _macro_settings() -> Any:
+    from augur.config.settings import MacroSettings
+
+    settings = _try_settings()
+    return settings.macro if settings is not None else MacroSettings()
+
+
+@macro_app.command("validate")
+def macro_validate(
+    path: str | None = typer.Option(
+        None, "--path", help="Файл (по умолчанию MACRO__CALENDAR_PATH)."
+    ),
+) -> None:
+    """Проверить YAML-календарь: схема, часовые пояса, уникальность id."""
+    from augur.data.calendar import CalendarError, load_calendar
+
+    p = path or _macro_settings().calendar_path
+    if not Path(p).is_file():
+        typer.echo(f"WARNING: {p} not found: calendar is empty, no event blackout", err=True)
+        raise typer.Exit(code=1)
+    try:
+        cal = load_calendar(p)
+    except CalendarError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    high = sum(1 for e in cal.events if e.impact == "high")
+    typer.echo(f"OK {p}: {len(cal.events)} events ({high} high-impact)")
+
+
+@macro_app.command("list")
+def macro_list(
+    symbol: str | None = typer.Option(None, "--symbol", help="Только события, затронувшие символ."),
+    days: int = typer.Option(7, "--days", min=1, help="Горизонт вперёд, дней."),
+) -> None:
+    """Предстоящие события календаря; `*` — окно блокировки входов Risk Gate."""
+    from augur.data.calendar import CalendarError, load_calendar
+
+    m = _macro_settings()
+    try:
+        cal = load_calendar(m.calendar_path)
+    except CalendarError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    now = _now_ms()
+    events = cal.select(
+        start_ms=now - m.blackout_after_min * 60_000,
+        end_ms=now + days * 86_400_000,
+        symbol=symbol,
+        aliases=m.currency_aliases,
+    )
+    if not events:
+        typer.echo("no events")
+    for ev in events:
+        blocking = ev.impact in m.blocking_impacts
+        typer.echo(
+            f"{'*' if blocking else ' '} {ev.time_iso}  {ev.impact:<6} {ev.id:<28} "
+            f"{','.join(ev.scope):<10} {ev.name}"
+        )
+    typer.echo(
+        f"blackout: -{m.blackout_before_min}/+{m.blackout_after_min} min "
+        f"for impact {','.join(m.blocking_impacts)}"
+    )
+
+
+@ml_app.command("nightly")
+def ml_nightly(
+    symbol: list[str] = typer.Option(  # noqa: B008 — typer
+        [], "--symbol", help="Символы (по умолчанию settings.symbols)."
+    ),
+    timeframe: str | None = typer.Option(None, "--timeframe", help="По умолчанию run.timeframe."),
+    db: str = DbOption,
+) -> None:
+    """Nightly job: realized_return, hit rate / ECE / P&L, PSI-дрейф → Fusion OPEN по активу."""
+    from augur.fusion.jobs import FusionJobs
+
+    settings = _ml_settings_or_default()
+    if timeframe:
+        settings = settings.model_copy(
+            update={"run": settings.run.model_copy(update={"timeframe": timeframe})}
+        )
+    conn = _open_db(db)
+    try:
+        jobs = FusionJobs(conn, settings, clock=_now_ms, actor=_actor())
+        reports = asyncio.run(jobs.nightly(force=True, symbols=list(symbol) or None))
+    finally:
+        conn.close()
+    drift = False
+    for r in reports:
+        typer.echo(
+            f"{r.asset} {r.timeframe} {r.model_version or '-'}: {r.status}"
+            + (f" ({r.reason})" if r.reason else "")
+        )
+        q = r.quality
+        if q:
+            typer.echo(
+                f"  n={q.get('n')} hit_rate={q.get('hit_rate')} accuracy={q.get('accuracy')} "
+                f"ece={q.get('ece')} pnl_net={q.get('pnl_net')} realized_filled={r.realized_filled}"
+            )
+        for name, value in r.psi.items():
+            mark = " DRIFT" if name in r.drifted else ""
+            typer.echo(f"  psi {name:<16} {value}{mark}")
+        if r.breaker_opened:
+            typer.echo(f"  Fusion OPEN for {r.asset}: retrain, then augur fusion breaker reset")
+        drift = drift or r.status == "drift"
+    if drift:
+        raise typer.Exit(code=3)
+
+
+@breaker_app.command("list")
+def fusion_breaker_list(db: str = DbOption) -> None:
+    """Активы с открытым Fusion-breaker (входы блокируются: HOLD)."""
+    from augur.fusion.breaker import list_open_breakers
+
+    conn = _open_db(db)
+    try:
+        rows = list_open_breakers(conn)
+    finally:
+        conn.close()
+    if not rows:
+        typer.echo("no open Fusion breakers")
+    for st in rows:
+        detail = st.detail
+        typer.echo(
+            f"{st.asset:<12} OPEN since {_fmt_ts(st.since_ts)} trigger={st.trigger} "
+            f"model={detail.get('model_version', '-')} drifted={detail.get('drifted', '-')}"
+        )
+
+
+@breaker_app.command("reset")
+def fusion_breaker_reset(
+    symbol: str = SymbolOpt,
+    approved_by: str = typer.Option(..., "--approved-by", help="Кто разобрал дрейф."),
+    reason: str = typer.Option("reviewed", "--reason", help="Итог разбора (в аудит)."),
+    confirm: bool = typer.Option(False, "--confirm", help="Обязательно: подтверждение сброса."),
+    db: str = DbOption,
+) -> None:
+    """Закрыть Fusion-breaker актива по одноразовому коду (после разбора / переобучения)."""
+    import secrets
+
+    from augur.fusion.breaker import asset_breaker_status, close_asset_breaker
+
+    if not confirm:
+        typer.echo("ERROR: --confirm is required", err=True)
+        raise typer.Exit(code=2)
+    if not approved_by.strip():
+        typer.echo("ERROR: --approved-by is required", err=True)
+        raise typer.Exit(code=2)
+    conn = _open_db(db)
+    try:
+        st = asset_breaker_status(conn, symbol)
+        if st.state != "OPEN":
+            typer.echo(f"Fusion breaker for {symbol} is not open")
+            return
+        typer.echo(f"{symbol}: OPEN since {_fmt_ts(st.since_ts)} trigger={st.trigger}")
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        typer.echo(f"confirmation code: {code}")
+        entered = typer.prompt("enter the code to close the breaker")
+        if not secrets.compare_digest(entered.strip(), code):
+            typer.echo("ERROR: invalid confirmation code", err=True)
+            raise typer.Exit(code=1)
+        try:
+            close_asset_breaker(
+                conn,
+                symbol,
+                actor=_actor(),
+                approved_by=approved_by.strip(),
+                reason=reason,
+                ts=_now_ms(),
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    finally:
+        conn.close()
+    typer.echo(f"Fusion breaker for {symbol} CLOSED (approved_by={approved_by.strip()})")
+
+
+def _serve_settings(env_file: str | None) -> Settings:
+    try:
+        if env_file is not None:
+            if not Path(env_file).is_file():
+                typer.echo(f"ERROR: env file not found: {env_file}", err=True)
+                raise typer.Exit(code=1)
+            return Settings(_env_file=env_file)  # type: ignore[call-arg]
+        return load_settings()
+    except ValidationError as e:
+        typer.echo(f"ERROR: settings invalid: {e.error_count()} error(s)", err=True)
+        raise typer.Exit(code=1) from e
+
+
+@fusion_app.command("serve")
+def fusion_serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Адрес. Наружу — только через TLS."),
+    port: int = typer.Option(8100, "--port", min=1, max=65535),
+    env_file: str | None = typer.Option(
+        None, "--env-file", help="Отдельный .env процесса Fusion (без ключей биржи)."
+    ),
+    allow_exchange_keys: bool = typer.Option(
+        False, "--allow-exchange-keys", help="Разрешить старт при ключах биржи в окружении."
+    ),
+    jobs: bool = typer.Option(
+        True, "--jobs/--no-jobs", help="Фоновые задачи: LLM-контекст, explain, nightly/PSI."
+    ),
+    db: str | None = typer.Option(None, "--db", help="Путь к SQLite (по умолчанию DB_PATH)."),
+) -> None:
+    """Fusion как HTTP-сервис для `HttpFusionClient` (POST /v1/fuse, GET /v1/health).
+
+    Процесс Fusion держит ключи LLM и ML-артефакты; ключей биржи в его окружении быть не
+    должно (FUSION SPEC §3.6) — иначе отказ (или `--allow-exchange-keys`).
+    """
+    import sqlite3 as _sqlite3
+
+    import uvicorn
+
+    from augur.fusion.factory import build_fusion_client
+    from augur.fusion.jobs import FusionJobs
+    from augur.fusion.server import create_fusion_app
+
+    settings = _serve_settings(env_file)
+    present = [f.upper() for f in _EXCHANGE_SECRETS if getattr(settings, f) is not None]
+    if present and not allow_exchange_keys:
+        typer.echo(
+            f"ERROR: exchange secrets in the Fusion environment: {', '.join(present)}. "
+            "Run with a separate --env-file (FUSION SPEC §3.6) or --allow-exchange-keys.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if settings.fusion_api_token is None or not settings.fusion_api_token.get_secret_value():
+        typer.echo("ERROR: FUSION_API_TOKEN is required", err=True)
+        raise typer.Exit(code=1)
+    if not settings.fusion.enabled:
+        typer.echo("ERROR: FUSION__ENABLED=true is required to serve Fusion", err=True)
+        raise typer.Exit(code=1)
+    # Сервис сам и есть Fusion: собственный FUSION__ENDPOINT игнорируется (иначе петля).
+    local = settings.model_copy(
+        update={"fusion": settings.fusion.model_copy(update={"endpoint": None})}
+    )
+    db_path = db or settings.db_path
+    _open_db(db_path).close()
+    if host not in LOOPBACK_HOSTS:
+        typer.echo(f"WARNING: listening on {host}: expose only behind TLS (ARCH §9.1)", err=True)
+
+    def connect() -> _sqlite3.Connection:
+        conn = _sqlite3.connect(db_path)
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    api = create_fusion_app(
+        token=settings.fusion_api_token,
+        connect=connect,
+        build_client=lambda c: build_fusion_client(c, local, clock=_now_ms),
+        build_jobs=(
+            (lambda c: FusionJobs(c, local, clock=_now_ms, actor="fusion_serve")) if jobs else None
+        ),
+        jobs_interval_s=local.run.tick_s,
+        describe={
+            "fusion_config_version": local.fusion.config.config_version,
+            "llm": local.fusion.llm.mode,
+        },
+    )
+    typer.echo(f"Augur Fusion: http://{host}:{port}/v1  (token: FUSION_API_TOKEN)")
+    uvicorn.run(api, host=host, port=port, log_level="info")
+
+
+@fusion_app.command("health")
+def fusion_health() -> None:
+    """Проверить внешний Fusion-сервис (`FUSION__ENDPOINT`, `FUSION_API_TOKEN`)."""
+    from augur.fusion.http import FusionUnavailable, HttpFusionClient
+
+    settings = _require_settings()
+    endpoint, token = settings.fusion.endpoint, settings.fusion_api_token
+    if endpoint is None or token is None:
+        typer.echo("ERROR: FUSION__ENDPOINT and FUSION_API_TOKEN are required", err=True)
+        raise typer.Exit(code=1)
+    client = HttpFusionClient(endpoint, token=token, timeout_ms=settings.fusion.timeout_ms)
+    try:
+        info = asyncio.run(client.health())
+    except FusionUnavailable as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    typer.echo(json.dumps(info, ensure_ascii=False, sort_keys=True))
+    if info.get("api_version", "").split(".")[0] != API_VERSION.split(".")[0]:
+        typer.echo(f"ERROR: api_version mismatch (client {API_VERSION})", err=True)
+        raise typer.Exit(code=1)

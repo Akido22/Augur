@@ -17,8 +17,11 @@
 3. Защитные выходы SL/TP — каждый тик для всех стеков (и при CB TRIPPED / KILLED).
 4. По расписанию: снимок портфеля + проверка CB по PnL (`snapshot_s`), реконсиляция
    (`execution.reconcile_interval_s`), новости (`news.poll_interval_s`, если есть ключ Finnhub),
-   LLM-контекст (`llm_refresh_s`), LLM explain (`explain_s`), переходы LLM-breaker, алерты
-   (`alerts_s`).
+   LLM-контекст (`llm_refresh_s`) и вызов LLM по событию календаря (`macro.llm_pre_event_min`),
+   LLM explain (`explain_s`), переходы LLM-breaker, nightly job ML / PSI-дрейф (раз в сутки
+   UTC после `run.nightly_hour_utc`), алерты (`alerts_s`). Задачи Fusion (`FusionJobs`)
+   выполняются здесь только для in-process Fusion; при `FUSION__ENDPOINT` их ведёт
+   `augur fusion serve` (ключи LLM — в процессе Fusion, FUSION SPEC §3.6).
 
 Сбой задачи не останавливает цикл: `RUN_ERROR` (CRITICAL → алерт) не чаще раза в 15 минут на
 задачу. Старт/стоп — `RUN_STARTED` / `RUN_STOPPED`. Ордера при остановке не отменяются: для
@@ -49,6 +52,7 @@ from augur.execution.modes import (
 )
 from augur.execution.pipeline import LiveStack, PaperStack, build_live_stack, build_paper_stack
 from augur.fusion.client import FusionClient
+from augur.fusion.jobs import FusionJobs
 from augur.notify.outbox import AlertDispatcher, build_notifier
 from augur.notify.telegram import Notifier
 from augur.signals.engine import SignalEngine, StrategyContext, StrategySignal
@@ -142,6 +146,9 @@ class Runner:
                 conn, config_hash=config_hash(settings), code_version=app_version
             ),
         )
+        self._fusion_jobs = FusionJobs(
+            conn, settings, clock=clock, llm_client=llm_client, actor=ACTOR
+        )
         self._alerts = AlertDispatcher(
             conn,
             settings.notify,
@@ -161,7 +168,26 @@ class Runner:
             actor=ACTOR
         )
         self._audit("RUN_STARTED", "INFO", {"timeframe": self._tf, "symbols": self._s.symbols})
+        self._check_calendar()
         await self._ensure_stacks()
+
+    def _check_calendar(self) -> None:
+        """Нет файла календаря — входы вокруг событий не блокируются: предупредить человека.
+        Невалидный — Risk Gate закрывает все входы (fail-closed): тоже предупредить."""
+        from pathlib import Path
+
+        from augur.data.calendar import CalendarError, load_calendar
+
+        path = self._s.macro.calendar_path
+        if not Path(path).is_file():
+            self._audit("MACRO_CALENDAR_MISSING", "WARN", {"path": path})
+            return
+        try:
+            cal = load_calendar(path)
+        except CalendarError as e:
+            self._audit("MACRO_CALENDAR_INVALID", "WARN", {"path": path, "error": str(e)[:300]})
+            return
+        log.info("macro calendar: %d events (%s)", len(cal.events), path)
 
     async def stop(self, *, reason: str) -> None:
         self._stop.set()
@@ -203,12 +229,16 @@ class Runner:
         await self._every("reconcile", ex.reconcile_interval_s, self._reconcile)
         if run.news and (self._news_fetchers is not None or self._s.finnhub_api_key is not None):
             await self._every("news", news.poll_interval_s, self._poll_news)
-        llm = self._s.fusion.llm
-        if self._s.fusion.enabled and llm.mode == "enabled":
-            await self._every("llm_refresh", run.llm_refresh_s, self._llm_refresh)
-        if llm.mode == "enabled" and llm.explain_enabled:
-            await self._every("explain", run.explain_s, self._explain)
-        await self._safe("llm_breaker", self._llm_breaker)
+        jobs = self._fusion_jobs
+        if self._s.fusion.endpoint is None:  # иначе задачи Fusion ведёт `augur fusion serve`
+            if jobs.llm_context_enabled:
+                await self._every("llm_refresh", run.llm_refresh_s, jobs.llm_refresh)
+                await self._safe("llm_pre_event", jobs.llm_pre_event)
+            if jobs.explain_enabled:
+                await self._every("explain", run.explain_s, jobs.explain)
+            await self._safe("llm_breaker", jobs.llm_breaker)
+            if jobs.nightly_enabled:
+                await self._safe("nightly", jobs.nightly)
         await self._every("alerts", run.alerts_s, self._alerts.dispatch)
 
     async def _every(self, name: str, interval_s: float, job: Job) -> None:
@@ -405,27 +435,3 @@ class Runner:
                 self._conn, self._s, fetchers=self._news_fetchers, clock=self._clock, scorer=scorer
             )
         await self._news.run_once()
-
-    async def _llm_refresh(self) -> None:
-        from augur.fusion.factory import refresh_llm_context
-
-        for symbol in self._s.symbols:
-            await refresh_llm_context(
-                self._conn,
-                self._s,
-                symbol=symbol,
-                timeframe=self._tf,
-                clock=self._clock,
-                client=self._llm_client,
-            )
-
-    async def _explain(self) -> None:
-        from augur.fusion.factory import build_explain_service
-
-        svc = build_explain_service(self._conn, self._s, clock=self._clock, client=self._llm_client)
-        await svc.explain_pending()
-
-    async def _llm_breaker(self) -> None:
-        from augur.fusion.llm.breaker import sync_breaker_states
-
-        sync_breaker_states(self._conn, self._s.fusion.llm, clock=self._clock)

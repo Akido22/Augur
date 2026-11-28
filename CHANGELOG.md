@@ -7,13 +7,90 @@
 
 ## [Unreleased]
 
+**Компоненты (готовится 0.12.0 — хвосты ML+LLM):** db_schema_version 8 (без изменений: состояние Fusion-breaker и отчёты nightly — в `audit_log`, `realized_return` уже был в `ml_predictions`) · api_version 1.0 (без изменений: контракт `fused_signal` не менялся, HTTP-контракт Fusion несёт его как есть) · config_version 7 → 8 · `ml_model_version` / `llm_prompt_version` без изменений (`prompt_context_v1`: шаблон тот же, в `<macro>` теперь приходят события) · зависимость `pyyaml>=6` объявлена явно (уже стояла транзитивно через `uvicorn[standard]`)
+
 **Компоненты (готовится 0.11.0 — FULL_AUTO):** db_schema_version 7 → 8 (`0008_notify`, expand) · api_version 1.0 (без изменений) · config_version 6 → 7 · `llm_prompt_version` + `prompt_explain_v1` · новых зависимостей нет (Telegram — через уже подключённый `httpx`)
 
 **Компоненты (готовится 0.10.0 — ML+LLM):** db_schema_version 7 (`0007_ml_llm`) · api_version 1.0 (без изменений: схема `fused_signal` не менялась, `source_breakdown.ml/llm` — объекты, что §4.6 допускает) · config_version 6 · `ml_model_version` `lightgbm_v<N>` · `llm_prompt_version` `prompt_context_v1`, `prompt_news_v1` · extra `ml` = `lightgbm>=4`, `numpy>=1.26` (убраны `scikit-learn`, `pandas`) · dev: `hypothesis`
 
 **Компоненты (готовится 0.9.0 — GUI/CLI):** db_schema_version 6 (без изменений) · api_version 1.0 (без изменений) · config_version 5 (без изменений) · новая зависимость `jinja2>=3.1`
 
-Блоки 0.11.0, 0.10.0, 0.9.0, 0.8.0 и 0.7.0 идут отдельно: ни один ещё не выпущен.
+Блоки 0.12.0, 0.11.0, 0.10.0, 0.9.0, 0.8.0 и 0.7.0 идут отдельно: ни один ещё не выпущен.
+
+### Добавлено — 0.12.0
+
+- Макро-календарь из YAML (`augur.data.calendar`, FUSION SPEC §3.1, §3.4, §6.1; ARCH §8.4):
+  `config/macro_calendar.yaml` ведёт человек (пример — `config/macro_calendar.example.yaml`),
+  схема Pydantic (`id`, `name`, `time` строго с часовым поясом, `impact`, `scope`; уникальные
+  id), правка файла подхватывается без рестарта. Нет файла — пустой календарь.
+- Risk Gate блокирует входы вокруг событий детерминированно, без LLM: `RiskContextBuilder`
+  добавляет `macro_flags` = `{high_impact_event_imminent, high}` для событий с
+  `impact ∈ macro.blocking_impacts`, затронувших символ (`scope`, алиасы `USDT → USD`), в окне
+  [−`blackout_before_min`, +`blackout_after_min`] (15/15 мин); R15 отклоняет BUY/SELL и пишет id
+  событий в причину, CLOSE/REDUCE и SL/TP не блокируются. Невалидный календарь →
+  `macro_calendar_invalid`/high: все входы закрыты (fail-closed).
+- LLM-контекст видит события календаря (`<macro>` в `prompt_context_v1`) на `llm_horizon_h`
+  вперёд; их id — evidence для grounding. `high_impact_event_imminent` принимается только со
+  ссылкой на high-impact событие в окне `llm_imminent_min` (FUSION SPEC §5.1), иначе
+  `ungrounded`. При таком событии — всегда N сэмплов variance filter (§5.2). Вызов LLM по
+  событию за `macro.llm_pre_event_min` (30) минут до high-impact события, один раз на событие.
+- Nightly job ML (`augur.fusion.ml.monitor`, FUSION SPEC §6.4): `ml_predictions.realized_return`
+  на горизонте модели; отчёт — hit rate, accuracy и ECE по triple-barrier меткам с параметрами
+  модели, P&L прогнозов с `confidence ≥ ml_min_confidence` за вычетом издержек общей `CostModel`;
+  PSI топ-N признаков (gain LightGBM) — эталон из `compute_features` на барах диапазона
+  обучения, окно — `drift.window_bars` последних баров; PSI confidence — в отчёт.
+  `ML_MONITOR_REPORT` в `audit_log` на каждый прогон. Раз в сутки UTC после
+  `run.nightly_hour_utc`; CLI `augur ml nightly [--symbol] [--timeframe]` (код выхода 3 при дрейфе).
+- PSI-дрейф → Fusion OPEN по активу (FUSION SPEC §5.4; `augur.fusion.breaker`): среднее PSI по
+  топ-N признакам > `drift.psi_threshold` (0.25) → `ML_DRIFT_DETECTED` (`retrain_required`) и
+  `FUSION_BREAKER_OPENED`; пока breaker открыт, `fuse()` даёт `HOLD` (`circuit_breaker_open`)
+  по активу. Состояние — в `audit_log`, автосброса нет: `augur fusion breaker reset --symbol S
+  --approved-by <имя> --confirm` с одноразовым кодом → `FUSION_BREAKER_CLOSED`;
+  `augur fusion breaker list`. Алерты: `ML_DRIFT_DETECTED`, `FUSION_BREAKER_OPENED/CLOSED`,
+  `MACRO_CALENDAR_MISSING/INVALID`.
+- `HttpFusionClient` (`augur.fusion.http`) и `augur fusion serve` (`augur.fusion.server`):
+  `POST /v1/fuse` (`FusionRequest` → 200 `FusedSignal` / 204 / 401 / 409 другой MAJOR
+  `api_version` / 422 / 503), `GET /v1/health`; Bearer `FUSION_API_TOKEN`, идемпотентность по
+  `idempotency_key` (LRU), Swagger выключен. Клиент без повторов: любой сбой →
+  `FusionUnavailable` → Signal Engine в ML-disabled (`FUSION_FALLBACK`); токен не попадает в
+  ошибки. Сервис держит ключи LLM и ML-артефакты, ведёт фоновые задачи (`FusionJobs`:
+  LLM-контекст, LLM по событию, explain, LLM-breaker, nightly) на отдельном соединении SQLite и
+  отказывается стартовать при ключах биржи в окружении (FUSION SPEC §3.6) — `--env-file` или
+  `--allow-exchange-keys`. `augur fusion health` проверяет сервис и `api_version`.
+- CLI: `augur macro validate | list [--symbol] [--days]`, `augur ml nightly`,
+  `augur fusion breaker list | reset`, `augur fusion serve [--host] [--port] [--env-file]
+  [--jobs/--no-jobs]`, `augur fusion health`. `augur run` пишет `MACRO_CALENDAR_MISSING` /
+  `MACRO_CALENDAR_INVALID` при старте.
+
+### Изменено — 0.12.0
+
+- `Settings` (config_version 8): `macro` (путь календаря, окна blackout, `blocking_impacts`,
+  горизонт и окна LLM, алиасы валют), `fusion.ml.drift` (порог, топ-N, бины, окна, эталон),
+  `run.nightly`, `run.nightly_hour_utc`, `fusion_api_token`; `fusion.endpoint` проверяется как
+  http(s)-URL.
+- `augur run`: задачи Fusion (LLM-контекст, explain, LLM-breaker, nightly) — общий класс
+  `FusionJobs`; при `FUSION__ENDPOINT` оркестратор их не выполняет (их ведёт `augur fusion serve`).
+- `build_fusion_client`: при `FUSION__ENDPOINT` — `HttpFusionClient` вместо `NotImplementedError`.
+- Решение пользователя по PSI: триггер — среднее PSI по топ-N признакам на окне 30 дней;
+  «любой из топ-10 > 0.25» и PSI confidence на окне 7 дней на стационарных данных давали ложные
+  OPEN (скользящие признаки автокоррелированы). PSI каждого признака и confidence — в отчёте.
+
+### Исправлено — 0.12.0
+
+- При открытом breaker (CB TRIPPED/KILLED, теперь и Fusion OPEN по активу) `fuse()` возвращал
+  HOLD до заполнения `source_breakdown.ml`, а `verify()` требовал ссылку на ML-прогноз: сигнал
+  становился невалидным → `classic_fallback`, и классический вход уходил в Risk Gate. Теперь
+  `LocalFusionClient` при открытом breaker не считает ML (FUSION SPEC §4.3 п. 1 до п. 2) и
+  отдаёт валидный HOLD (решение пользователя: для любого breaker). Следствие: при CB TRIPPED
+  классические CLOSE больше не проходят через fallback — выход остаётся за SL/TP.
+
+### Не вошло в 0.12.0
+
+- Признак «минуты до ближайшего high-impact события» в ML (FUSION SPEC §2.2) — меняет
+  `feature_set_version` и требует переобучения; отдельным этапом. Таблица `macro_events` (ARCH
+  §2.3) и загрузка календаря из Finnhub — нет: источник только YAML.
+- Триггер «устаревание данных → Fusion OPEN с автосбросом» (§5.4) и еженедельный отчёт
+  полезности LLM (§6.4) — позже. LLM-breaker по-прежнему без HALF_OPEN.
 
 ### Добавлено — 0.11.0
 

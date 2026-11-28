@@ -28,13 +28,13 @@ dev = [
     "pytest-asyncio",
     "ruff",
     "mypy",
+    "hypothesis",  # property-тесты инвариантов fuse() (FUSION SPEC §4.3), 0.10.0
 ]
-# Опционально: для этапа 0.10.0 (ML-модели). На этапе 0.1.0 не используется.
+# ML-слой (0.10.0): импортируется только внутри augur.fusion.ml. Калибровка — собственный код,
+# поэтому scikit-learn и pandas не нужны.
 ml = [
-    "lightgbm",
-    "scikit-learn",
-    "pandas",
-    "numpy",
+    "lightgbm>=4",
+    "numpy>=1.26",
 ]
 # SDK площадок (0.2.0): импортируются лениво при connect(); тесты работают без них.
 ccxt = ["ccxt>=4"]

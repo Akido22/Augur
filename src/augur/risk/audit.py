@@ -5,13 +5,16 @@
 `RISK_REJECTED` с полным списком `CheckResult`). Ошибка → ROLLBACK, исключение наверх:
 нет записи в аудите — нет ордера.
 
-Версии ML/LLM: пока артефакт не участвовал в решении (до 0.10.0) — `"n/a"` (VERSIONING.md §2.3).
+Версии ML/LLM: если артефакт не участвовал в решении — `"n/a"` (VERSIONING.md §2.3). Для
+сигнала Fusion (0.10.0+) версии, `ml_prediction_id` и `llm_status` берутся из
+`fused_signals.source_breakdown_json` (`ml.model_version`, `ml.prediction_id`,
+`llm.prompt_version`, `llm.status`), если вызывающий не передал их явно.
 """
 
 import json
 import sqlite3
 from collections.abc import Sequence
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -110,20 +113,56 @@ class DecisionAuditWriter:
         ).fetchall()
         return ",".join(sorted(str(r[0]) for r in rows if r[0]))
 
+    def fusion_versions(self, fused_signal_id: str | None) -> dict[str, Any]:
+        """Версии ML/LLM из `source_breakdown` записанного `fused_signal` (n/a — не участвовали)."""
+        out: dict[str, Any] = {
+            "ml_model_version": NO_ARTIFACT,
+            "llm_prompt_version": NO_ARTIFACT,
+            "ml_prediction_id": None,
+            "llm_status": None,
+        }
+        if fused_signal_id is None:
+            return out
+        row = self._conn.execute(
+            "SELECT source_breakdown_json FROM fused_signals WHERE id=?", (fused_signal_id,)
+        ).fetchone()
+        if row is None:
+            return out
+        bd = json.loads(row[0])
+        ml, llm = bd.get("ml"), bd.get("llm")
+        if isinstance(ml, dict) and ml.get("model_version"):
+            out["ml_model_version"] = str(ml["model_version"])
+            out["ml_prediction_id"] = ml.get("prediction_id")
+        if isinstance(llm, dict) and llm.get("status") in ("ok", "rejected", "fallback_ml_only"):
+            out["llm_status"] = llm["status"]
+            if llm.get("prompt_version"):
+                out["llm_prompt_version"] = str(llm["prompt_version"])
+        return out
+
     def build_record(
         self,
         sig: SignalReady,
         verdict: RiskVerdict,
         *,
         strategy_version: str | None = None,
-        ml_model_version: str = NO_ARTIFACT,
-        llm_prompt_version: str = NO_ARTIFACT,
+        ml_model_version: str | None = None,
+        llm_prompt_version: str | None = None,
         ml_prediction_id: str | None = None,
         llm_status: Literal["ok", "rejected", "fallback_ml_only"] | None = None,
     ) -> DecisionAuditRecord:
-        """Собирает запись; `id` — ULID из `explanation_ref="decision_audit:<ulid>"` или новый."""
+        """Собирает запись; `id` — ULID из `explanation_ref="decision_audit:<ulid>"` или новый.
+
+        Не переданные версии ML/LLM берутся из `fused_signals` (`fusion_versions`).
+        """
         if verdict.signal_id != sig.signal_id:
             raise ValueError("verdict does not belong to signal")
+        fv = self.fusion_versions(sig.fused_signal_id)
+        if ml_model_version is None:
+            ml_model_version = fv["ml_model_version"]
+            ml_prediction_id = ml_prediction_id or fv["ml_prediction_id"]
+        if llm_prompt_version is None:
+            llm_prompt_version = fv["llm_prompt_version"]
+            llm_status = llm_status or fv["llm_status"]
         created_at = int(verdict.evaluated_at.timestamp() * 1000)
         return DecisionAuditRecord(
             id=decision_id_from_ref(sig.explanation_ref) or new_ulid(created_at),
@@ -152,8 +191,8 @@ class DecisionAuditWriter:
         verdict: RiskVerdict,
         *,
         strategy_version: str | None = None,
-        ml_model_version: str = NO_ARTIFACT,
-        llm_prompt_version: str = NO_ARTIFACT,
+        ml_model_version: str | None = None,
+        llm_prompt_version: str | None = None,
         ml_prediction_id: str | None = None,
         llm_status: Literal["ok", "rejected", "fallback_ml_only"] | None = None,
     ) -> DecisionAuditRecord:

@@ -53,11 +53,189 @@ class RiskLimits(BaseModel):
     reduce_fraction: Decimal = Field(default=Decimal("0.5"), gt=0, le=1)
 
 
+class FusionWeights(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ml: float = Field(default=0.5, ge=0, le=1)
+    tech: float = Field(default=0.3, ge=0, le=1)
+    llm: float = Field(default=0.2, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _sum_is_one(self) -> Self:
+        if abs(self.ml + self.tech + self.llm - 1.0) > 1e-9:
+            raise ValueError("fusion weights must sum to 1")
+        return self
+
+
+class FusionConflict(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    llm_opposite_threshold: float = Field(default=0.5, gt=0, le=1)
+    strength_multiplier: float = Field(default=0.5, ge=0, le=1)
+
+
+class FusionConfig(BaseModel):
+    """Веса, пороги и veto `fuse()` (ML_LLM_FUSION_SPEC.md §4.2). Числа [Д8] — стартовые.
+
+    Любое изменение значений — новая `config_version` (§4.2): по ней воспроизводится решение.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    config_version: str = Field(default="fusion-2026.11.1", min_length=1)
+    weights: FusionWeights = FusionWeights()
+    ml_min_confidence: float = Field(default=0.55, gt=0, lt=1)
+    entry_threshold: float = Field(default=0.30, gt=0, le=1)
+    strong_threshold: float = Field(default=0.60, gt=0, le=1)
+    llm_can_amplify: bool = False
+    llm_max_age_s: int = Field(default=1800, gt=0)
+    blocked_entry_regimes: list[str] = Field(default_factory=lambda: ["chaotic"])
+    conflict: FusionConflict = FusionConflict()
+    medium_flag_multiplier: float = Field(default=0.5, ge=0, le=1)
+    on_high_flag_with_open_position: Literal["reduce", "hold", "exit"] = "reduce"
+    ml_only_strength_multiplier: float = Field(default=0.5, ge=0, le=1)
+    signal_ttl_fraction_of_bar: float = Field(default=0.5, gt=0, le=1)
+
+
+class MLFeatureSettings(BaseModel):
+    """Признаки (FUSION SPEC §2.2). Изменение любого поля меняет `feature_set_version`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    return_lags: list[int] = Field(default_factory=lambda: [1, 2, 4, 8, 16, 32])
+    window: int = Field(default=200, ge=120)  # хвост истории на один вектор = warm-up
+
+
+class MLRegimeSettings(BaseModel):
+    """Пороги детерминированного `regime_tag` (skill ml-training-inference, п. 12)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    chaotic_rv_ratio: float = Field(default=2.5, gt=0)  # RV(20)/RV(100) выше и нет тренда
+    high_vol_atr_pct: float = Field(default=0.9, gt=0, le=1)  # перцентиль ATR в окне
+    trend_adx: float = Field(default=25.0, gt=0, le=100)
+
+
+class MLTrainSettings(BaseModel):
+    """Разметка, walk-forward и гиперпараметры (FUSION SPEC §2.1, §2.3). Фиксированы: trials=1."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    barrier_k: float = Field(default=1.5, gt=0)
+    horizon_bars: int = Field(default=4, ge=1)
+    train_bars: int = Field(default=2000, ge=100)
+    test_bars: int = Field(default=500, ge=20)
+    calib_fraction: float = Field(default=0.15, gt=0, lt=1)
+    calib_min: int = Field(default=200, ge=20)
+    isotonic_min: int = Field(default=1000, ge=10)  # иначе Platt
+    expanding: bool = False
+    seed: int = 42
+    num_leaves: int = Field(default=15, ge=2)
+    learning_rate: float = Field(default=0.05, gt=0)
+    n_estimators: int = Field(default=200, ge=1)
+    min_data_in_leaf: int = Field(default=50, ge=1)
+
+
+class MLPromotionSettings(BaseModel):
+    """Критерии промоушена в production (FUSION SPEC §2.4)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_ece: float = Field(default=0.05, gt=0, le=1)
+    min_staging_days: int = Field(default=14, ge=0)
+
+
+class MLSettings(BaseModel):
+    """ML-слой `augur.fusion.ml` (FUSION SPEC §2, skill ml-training-inference)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    artifacts_dir: str = "artifacts/ml"
+    venue: str = "ccxt:binance"  # venue баров в `ohlcv` для признаков
+    features: MLFeatureSettings = MLFeatureSettings()
+    regime: MLRegimeSettings = MLRegimeSettings()
+    train: MLTrainSettings = MLTrainSettings()
+    promotion: MLPromotionSettings = MLPromotionSettings()
+
+
+class LLMPrice(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input: float = Field(default=0.0, ge=0)  # USD за 1M токенов [Д6]
+    output: float = Field(default=0.0, ge=0)
+
+
+class LLMProvider(BaseModel):
+    """OpenAI-совместимый провайдер (FUSION SPEC §3.4). Ключ — поле `Settings.llm_<key>_key`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    base_url: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    api_key: Literal["anthropic", "deepseek", "openai"] | None = None
+    price_per_mtok: LLMPrice = LLMPrice()
+    # false — `temperature` не отправляется (часть моделей, напр. Claude Sonnet 5.5, отвечает 400
+    # на нестандартные значения); разнообразие сэмплов даёт перестановка новостей (§5.2).
+    send_temperature: bool = False
+
+
+class LLMVarianceSettings(BaseModel):
+    """Variance filter (FUSION SPEC §5.2)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    samples: int = Field(default=3, ge=1)
+    min_valid: int = Field(default=2, ge=1)
+    temperature: float = Field(default=0.5, ge=0, le=2)
+    max_score_std: float = Field(default=0.25, ge=0)
+    max_score_range: float = Field(default=0.6, ge=0)
+
+
+class LLMSettings(BaseModel):
+    """LLM-слой `augur.fusion.llm` (FUSION SPEC §3). По умолчанию выключен: Fusion = ML-only."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    mode: Literal["enabled", "ml_only", "disabled"] = "disabled"
+    daily_usd: float = Field(default=10.0, ge=0)
+    event_only_budget_fraction: float = Field(default=0.8, gt=0, le=1)  # ≥ 80 % — только события
+    max_calls_per_asset_hour: int = Field(default=6, ge=1)
+    timeout_s: float = Field(default=8.0, gt=0)
+    max_retries: int = Field(default=1, ge=0, le=1)  # повтор с текстом ошибки, не «починка»
+    max_tokens: int = Field(default=800, ge=64)
+    news_window_h: int = Field(default=6, gt=0)
+    max_news: int = Field(default=20, ge=1)
+    news_body_chars: int = Field(default=500, ge=50)
+    empty_input_max_abs_score: float = Field(default=0.2, ge=0, le=1)
+    variance: LLMVarianceSettings = LLMVarianceSettings()
+    # LLM-breaker (§5.4): доля отклонённых за час > порога при ≥ min_calls → ML-only.
+    breaker_reject_ratio: float = Field(default=0.2, gt=0, le=1)
+    breaker_min_calls: int = Field(default=10, ge=1)
+    providers: list[LLMProvider] = Field(
+        default_factory=lambda: [
+            LLMProvider(
+                name="anthropic",
+                base_url="https://api.anthropic.com/v1/",
+                model="claude-sonnet-5-5",
+                api_key="anthropic",
+            )
+        ]
+    )
+
+
 class FusionSettings(BaseModel):
-    """Настройки клиента Fusion (контракт — ML_LLM_FUSION_SPEC.md §4.6)."""
+    """Настройки Fusion (контракт — ML_LLM_FUSION_SPEC.md §4.6).
+
+    `enabled=false` → только классика. `enabled=true` без `endpoint` → in-process
+    `LocalFusionClient` (0.10.0): ML + LLM-контекст + `fuse()`.
+    """
 
     enabled: bool = False
-    endpoint: str | None = None  # None → in-process StubFusionClient
+    endpoint: str | None = None  # None → in-process LocalFusionClient (0.10.0)
+    config: FusionConfig = FusionConfig()
+    ml: MLSettings = MLSettings()
+    llm: LLMSettings = LLMSettings()
     timeout_ms: int = 1500
     max_invalid_streak: int = 5  # для CB-триггера (ARCHITECTURE.md §7.4)
     # CB-триггер по доле невалидных (ARCH §7.4): > invalid_ratio за последние invalid_window.
@@ -189,6 +367,8 @@ class NewsSettings(BaseModel):
     # Вес источника умножает confidence RuleBasedScorer; нет в словаре — 1.0.
     source_weights: dict[str, float] = Field(default_factory=lambda: {"finnhub": 1.0})
     summary_max_chars: int = Field(default=1000, gt=0)
+    # 0.10.0: "llm" — LLM-скорер Fusion (`fusion:prompt_news_v1`) с fallback на rule:v1.
+    scorer: Literal["rule", "llm"] = "rule"
     rules: list[NewsRule] = Field(default_factory=_default_news_rules)
 
 
@@ -228,6 +408,10 @@ class Settings(BaseSettings):
     finnhub_api_key: SecretStr | None = None
     newsapi_api_key: SecretStr | None = None
     alphavantage_api_key: SecretStr | None = None
+    # Ключи LLM (FUSION SPEC §3.6): передаются только LLM-клиенту, не Execution.
+    llm_anthropic_key: SecretStr | None = None
+    llm_deepseek_key: SecretStr | None = None
+    llm_openai_key: SecretStr | None = None
     api_auth_token: SecretStr  # обязателен для GUI/API
 
 

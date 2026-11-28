@@ -7,9 +7,79 @@
 
 ## [Unreleased]
 
+**Компоненты (готовится 0.10.0 — ML+LLM):** db_schema_version 7 (`0007_ml_llm`) · api_version 1.0 (без изменений: схема `fused_signal` не менялась, `source_breakdown.ml/llm` — объекты, что §4.6 допускает) · config_version 6 · `ml_model_version` `lightgbm_v<N>` · `llm_prompt_version` `prompt_context_v1`, `prompt_news_v1` · extra `ml` = `lightgbm>=4`, `numpy>=1.26` (убраны `scikit-learn`, `pandas`) · dev: `hypothesis`
+
 **Компоненты (готовится 0.9.0 — GUI/CLI):** db_schema_version 6 (без изменений) · api_version 1.0 (без изменений) · config_version 5 (без изменений) · новая зависимость `jinja2>=3.1`
 
-Блоки 0.9.0, 0.8.0 и 0.7.0 идут отдельно: ни один ещё не выпущен.
+Блоки 0.10.0, 0.9.0, 0.8.0 и 0.7.0 идут отдельно: ни один ещё не выпущен.
+
+### Добавлено — 0.10.0
+
+- ML-слой `augur.fusion.ml` (FUSION SPEC §2, skill `ml-training-inference`): одна
+  `compute_features` для обучения и инференса (хвост из `window` закрытых баров, стационарные
+  признаки на numpy, `feature_set_version = fs_<sha256[:12]>`); triple-barrier (`k·ATR`, `h`
+  баров, оба барьера в одном баре → flat); purged walk-forward с embargo; LightGBM multiclass
+  (`seed`, `deterministic`, `force_row_wise`, `num_threads=1`); калибровка isotonic/Platt
+  собственным кодом с параметрами в JSON; метрики log-loss, Brier, ECE, Sharpe и max DD с
+  издержками общей `CostModel`, `trials=1`; `regime_tag` по правилам (chaotic → high_vol →
+  тренд → range).
+- Артефакт `artifacts/ml/lightgbm_v<N>/` (`model.txt`, `calibrator.json`, `meta.json`, без
+  pickle), sha256 по содержимому каталога, запись в существующий каталог запрещена.
+- Реестр моделей (`ml_models` + `artifacts`): новая модель — `candidate`; candidate → staging →
+  production → retired только вручную; production — после ≥ 14 дней в staging, ECE ≤ порога,
+  Sharpe не хуже текущей; одна production-модель на имя (частичный UNIQUE). Загрузка только
+  `get_production` → `load` со сверкой sha256 и `feature_set_version`; расхождение →
+  `ML_MODEL_UNAVAILABLE` (WARN) и «ML отсутствует → NO_SIGNAL».
+- `MLService`: прогноз пишется в `ml_predictions` до `fuse()`, повтор бара возвращает ту же
+  строку; `replay_prediction` сверяет `class_probs` и `input_hash`.
+- LLM-слой `augur.fusion.llm` (FUSION SPEC §3, §5, skill `llm-output-validation`): один
+  OpenAI-совместимый клиент на httpx (`response_format=json_object`, без tool use; `temperature`
+  отправляется только при `send_temperature`); `LLMContext` strict + grounding `evidence_ids`;
+  семантика (asset, as_of, календарные флаги, нейтральный скор без входа); один повтор с текстом
+  ошибки, без «починки»; variance filter (N сэмплов с разным порядком новостей, медиана, флаги
+  большинства, high у меньшинства → medium; без новостей — 1 сэмпл); цепочка провайдеров →
+  ML-only; бюджет `daily_usd` (с 80 % — только события), лимит вызовов на актив в час,
+  LLM-breaker по доле отклонённых за час, сканер секретов, очистка текста новостей. Каждая
+  попытка — строка `llm_calls`.
+- Версии промптов `prompts/<task>/<version>.j2` с отпечатком в `artifacts(kind='llm_prompt')`
+  (текст + модели провайдеров + параметры): та же версия с другим отпечатком отклоняется.
+- LLM-скорер новостей `LLMNewsScorer` (`fusion:prompt_news_v1`) — реализация `SentimentScorer`;
+  `NEWS__SCORER=llm`, при любом сбое — результат `rule:v1`.
+- `fuse()` (`augur.fusion.engine`, FUSION SPEC §4.3–4.5): чистая функция, правила 1–10 по
+  порядку, числа только из `FusionConfig` (`FUSION__CONFIG`, версия `fusion-2026.11.1`);
+  `verify()` — инварианты §5. `source_breakdown` хранит входы (ML с `prediction_id`, LLM с
+  `context_id` и `llm_call_ids`, tech, состояние позиции и CB, `now`/`bar`).
+- `LocalFusionClient` — in-process Fusion при `FUSION__ENABLED=true` без `FUSION__ENDPOINT`:
+  бары из `ohlcv` → ML → последний LLM-контекст из `llm_contexts` (LLM не вызывается на
+  критическом пути) → `fuse()` → `verify()`. Сборка — `augur.fusion.factory.build_fusion_client`.
+- `replay_fused` (FUSION SPEC §5.5): `fuse()` на сохранённых входах по id `fused_signal` или
+  `decision_audit`, без сети; другая `fusion_config_version` → ошибка.
+- CLI: `augur ml train | list | promote <v> --to … --approved-by … --confirm | replay <id>`,
+  `augur llm refresh --symbol [--event] | usage`, `augur fusion replay <id> [--json]`.
+- Миграция `0007_ml_llm`: `ml_models` (+ `status_changed_at`, UNIQUE `version`),
+  `ml_predictions`, `llm_calls` (+ task `news_sentiment`), `llm_contexts` (append-only).
+- Тесты `tests/fusion/`: look-ahead бит-в-бит, golden triple-barrier, purge/embargo,
+  детерминизм обучения, реестр (подмена артефакта, вторая production, калибратор), replay ML и
+  Fusion, правила `fuse()` и golden-пример §4.6, property-тесты инвариантов §4.3 (hypothesis),
+  валидация LLM, variance filter, бюджет, breaker, сканер секретов, HTTP-клиент, e2e
+  Signal Engine → `decision_audit`, границы импорта, CLI.
+
+### Изменено — 0.10.0
+
+- `DecisionAuditWriter`: для сигнала Fusion `ml_model_version`, `ml_prediction_id`,
+  `llm_prompt_version`, `llm_status` берутся из `fused_signals.source_breakdown_json`; без
+  ML/LLM — по-прежнему `n/a`.
+- `build_news_pipeline(..., scorer=)` принимает скорер снаружи (news не импортирует fusion).
+- `Settings`: `fusion.config`, `fusion.ml`, `fusion.llm` (по умолчанию `mode=disabled`),
+  `news.scorer`, ключи `LLM_ANTHROPIC_KEY`, `LLM_DEEPSEEK_KEY`, `LLM_OPENAI_KEY`.
+
+### Не вошло в 0.10.0
+
+- `explain` для `decision_audit.explanation` — 0.11.0. Макро-календаря нет: флаг
+  `high_impact_event_imminent` всегда отклоняется как ungrounded. Rolling z-score
+  `context_score` (§5.2), PSI-дрейф и nightly job (§6.4), кэш по `prompt_hash`,
+  `HttpFusionClient` и отдельный процесс для LLM — позже. Оркестратора нет: `augur llm refresh`
+  и вызов Signal Engine запускаются вручную или из будущего планировщика.
 
 ### Документация — подготовка 0.10.0
 

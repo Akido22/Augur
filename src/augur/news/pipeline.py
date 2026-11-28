@@ -170,8 +170,12 @@ def build_news_pipeline(
     *,
     fetchers: Sequence[NewsFetcher] | None = None,
     clock: Callable[[], int] | None = None,
+    scorer: SentimentScorer | None = None,
 ) -> NewsPipeline:
     """Composition root из настроек. Без `fetchers` — Finnhub (нужен `FINNHUB_API_KEY`).
+
+    `scorer` — LLM-скорер Fusion (0.10.0) собирает вызывающий (interfaces): news не импортирует
+    fusion. По умолчанию — `RuleBasedScorer`.
 
     Raises:
         ValueError: источник не настроен (нет ключа).
@@ -193,7 +197,7 @@ def build_news_pipeline(
     return NewsPipeline(
         conn,
         fetchers=fetchers,
-        scorer=RuleBasedScorer(cfg.source_weights),
+        scorer=scorer if scorer is not None else RuleBasedScorer(cfg.source_weights),
         mapper=SymbolMapper(settings.symbols, cfg.symbol_aliases),
         reactions=NewsReactionRules(conn, cfg.rules),
         lookback=timedelta(hours=cfg.lookback_h),

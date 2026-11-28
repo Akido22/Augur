@@ -58,6 +58,9 @@ augur news reactions | lift <id> --confirm   # активные паузы/фл�
 augur signals list | explain <id> [--json]   # лента сигналов; цепочка решения (сигнал или ордер)
 augur audit explain <id> | verify-chain      # цепочка решения; проверка hash-chain audit_log
 augur gui [--host 127.0.0.1] [--port 8000]   # GUI мониторинга + REST /api/v1 + /ws/events (Bearer)
+augur ml train --symbol S | list | promote <v> --to … --approved-by … --confirm | replay <id>
+augur llm refresh --symbol S [--event] | usage   # LLM-контекст актива; расход за сутки
+augur fusion replay <id> [--json]            # fuse() на сохранённых входах, сверка с записью
 ```
 
 Перед коммитом: `ruff check .` и `pytest` должны проходить.

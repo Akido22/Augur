@@ -25,6 +25,7 @@ EXPECTED = [
     "0004_risk_state",
     "0005_execution",
     "0006_news",
+    "0007_ml_llm",
 ]
 
 
@@ -36,8 +37,8 @@ def migrations(tmp_path: Path) -> Path:
     return target
 
 
-def _migrator(migrations: Path, tmp_path: Path, expected: int = 6) -> Migrator:
-    """`expected` — DB_SCHEMA_VERSION «кода»; тесты с 0007+ на диске поднимают его."""
+def _migrator(migrations: Path, tmp_path: Path, expected: int = 7) -> Migrator:
+    """`expected` — DB_SCHEMA_VERSION «кода»; тесты с 0008+ на диске поднимают его."""
     return Migrator(
         migrations, backup_dir=tmp_path / "backups", app_version="0.1.0", expected_schema=expected
     )
@@ -58,7 +59,7 @@ def test_fresh_db_applies_all(migrations: Path, tmp_path: Path) -> None:
     db = tmp_path / "data" / "augur.db"
     result = _migrator(migrations, tmp_path).migrate(str(db))
     assert result.applied == EXPECTED
-    assert result.schema_version == 6
+    assert result.schema_version == 7
     rows = _rows(db)
     assert [(v, n, cp, av) for v, n, _, cp, av, _ in rows] == [
         (1, "0001_core", "expand", "0.1.0"),
@@ -67,6 +68,7 @@ def test_fresh_db_applies_all(migrations: Path, tmp_path: Path) -> None:
         (4, "0004_risk_state", "expand", "0.1.0"),
         (5, "0005_execution", "expand", "0.1.0"),
         (6, "0006_news", "expand", "0.1.0"),
+        (7, "0007_ml_llm", "expand", "0.1.0"),
     ]
     assert all(isinstance(r[5], int) and r[5] > 1_700_000_000_000 for r in rows)  # ms
     assert rows[0][2] == file_checksum((migrations / "0001_core.sql").read_text("utf-8"))
@@ -79,8 +81,8 @@ def test_second_migrate_is_noop(migrations: Path, tmp_path: Path) -> None:
     again = m.migrate(db)
     assert again.applied == []
     assert again.backup_path is None
-    assert again.schema_version == 6
-    assert len(_rows(Path(db))) == 6
+    assert again.schema_version == 7
+    assert len(_rows(Path(db))) == 7
 
 
 def test_status_before_and_after(migrations: Path, tmp_path: Path) -> None:
@@ -96,15 +98,15 @@ def test_status_before_and_after(migrations: Path, tmp_path: Path) -> None:
 def test_checksum_mismatch_blocks_migrate(migrations: Path, tmp_path: Path) -> None:
     db = str(tmp_path / "augur.db")
     _migrator(migrations, tmp_path).migrate(db)
-    m = _migrator(migrations, tmp_path, expected=7)
+    m = _migrator(migrations, tmp_path, expected=8)
     path = migrations / "0002_ohlcv.sql"
     path.write_text(path.read_text("utf-8") + "\n-- правка истории\n", encoding="utf-8")
-    (migrations / "0007_new.sql").write_text(
+    (migrations / "0008_new.sql").write_text(
         "-- compat: expand\nCREATE TABLE t4 (x INTEGER) STRICT;\n", encoding="utf-8"
     )
     with pytest.raises(ChecksumMismatchError, match="0002_ohlcv"):
         m.migrate(db)
-    assert len(_rows(Path(db))) == 6  # 0007 не применена
+    assert len(_rows(Path(db))) == 7  # 0008 не применена
 
 
 def test_crlf_does_not_change_checksum() -> None:
@@ -113,15 +115,15 @@ def test_crlf_does_not_change_checksum() -> None:
 
 def test_failed_migration_rolls_back_only_itself(migrations: Path, tmp_path: Path) -> None:
     db = str(tmp_path / "augur.db")
-    (migrations / "0007_broken.sql").write_text(
+    (migrations / "0008_broken.sql").write_text(
         "-- compat: expand\nCREATE TABLE half_done (x INTEGER) STRICT;\nTHIS IS NOT SQL;\n",
         encoding="utf-8",
     )
-    (migrations / "0008_after.sql").write_text(
+    (migrations / "0009_after.sql").write_text(
         "-- compat: expand\nCREATE TABLE after_broken (x INTEGER) STRICT;\n", encoding="utf-8"
     )
-    with pytest.raises(MigrationFailedError, match="0007_broken"):
-        _migrator(migrations, tmp_path, expected=8).migrate(db)
+    with pytest.raises(MigrationFailedError, match="0008_broken"):
+        _migrator(migrations, tmp_path, expected=9).migrate(db)
     assert [r[1] for r in _rows(Path(db))] == EXPECTED
     conn = sqlite3.connect(db)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -133,40 +135,40 @@ def test_failed_migration_rolls_back_only_itself(migrations: Path, tmp_path: Pat
 def test_backup_created_before_migration(migrations: Path, tmp_path: Path) -> None:
     db = str(tmp_path / "augur.db")
     _migrator(migrations, tmp_path).migrate(db)
-    (migrations / "0007_extra.sql").write_text(
+    (migrations / "0008_extra.sql").write_text(
         "-- compat: expand\nCREATE TABLE extra (x INTEGER) STRICT;\n", encoding="utf-8"
     )
-    result = _migrator(migrations, tmp_path, expected=7).migrate(db)
-    assert result.applied == ["0007_extra"]
+    result = _migrator(migrations, tmp_path, expected=8).migrate(db)
+    assert result.applied == ["0008_extra"]
     backups = sorted((tmp_path / "backups").glob("augur_pre_v0.1.0_schema*.db"))
-    assert len(backups) == 2  # перед первой миграцией и перед 0007
-    assert result.backup_path is not None and "schema6" in result.backup_path
+    assert len(backups) == 2  # перед первой миграцией и перед 0008
+    assert result.backup_path is not None and "schema7" in result.backup_path
     conn = sqlite3.connect(result.backup_path)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
-    assert "ohlcv" in tables and "extra" not in tables  # снимок до 0007
+    assert "ohlcv" in tables and "extra" not in tables  # снимок до 0008
 
 
 def test_db_newer_than_code(migrations: Path, tmp_path: Path) -> None:
     db = str(tmp_path / "augur.db")
-    extra = migrations / "0007_extra.sql"
+    extra = migrations / "0008_extra.sql"
     extra.write_text("-- compat: expand\nCREATE TABLE e (x INTEGER) STRICT;\n", encoding="utf-8")
-    _migrator(migrations, tmp_path, expected=7).migrate(db)  # «новый» код применил 0007
+    _migrator(migrations, tmp_path, expected=8).migrate(db)  # «новый» код применил 0008
     extra.unlink()
-    m = _migrator(migrations, tmp_path)  # откат кода: ожидает схему 6
+    m = _migrator(migrations, tmp_path)  # откат кода: ожидает схему 7
     assert m.migrate(db).applied == []  # expand-миграция из будущего — совместимо
     assert m.status(db)[-1].state == "missing_file"
 
     conn = sqlite3.connect(db)
-    conn.execute("UPDATE schema_migrations SET compat='contract' WHERE version=7")
+    conn.execute("UPDATE schema_migrations SET compat='contract' WHERE version=8")
     conn.commit()
     conn.close()
-    with pytest.raises(SchemaVersionMismatchError, match="DB schema 7 > code expects 6"):
+    with pytest.raises(SchemaVersionMismatchError, match="DB schema 8 > code expects 7"):
         m.migrate(db)
 
 
 def test_bad_files_rejected(migrations: Path, tmp_path: Path) -> None:
-    (migrations / "0007_nocompat.sql").write_text("CREATE TABLE x (a INTEGER);\n", "utf-8")
+    (migrations / "0008_nocompat.sql").write_text("CREATE TABLE x (a INTEGER);\n", "utf-8")
     with pytest.raises(MigrationError, match="compat"):
         _migrator(migrations, tmp_path).discover()
 
@@ -188,11 +190,11 @@ def test_cli_db_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert "applied: 0003_fusion_contract" in res.output
 
     res = runner.invoke(app, ["db", "migrate", "--db", db])
-    assert res.exit_code == 0 and "up to date: schema 6" in res.output
+    assert res.exit_code == 0 and "up to date: schema 7" in res.output
 
     res = runner.invoke(app, ["db", "status", "--db", db])
     assert res.exit_code == 0
-    assert sum(" applied " in line for line in res.output.splitlines()) == 6
+    assert sum(" applied " in line for line in res.output.splitlines()) == 7
 
     res = runner.invoke(app, ["db", "backup", "--db", db])
     assert res.exit_code == 0 and "backup:" in res.output

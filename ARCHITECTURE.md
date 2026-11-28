@@ -1587,7 +1587,7 @@ augur/
     └── e2e/           # сценарии: CB trip, kill switch, duplicate signal, reconnect
 ```
 
-> `src/augur/fusion/` — **тонкий интерфейсный модуль**: только контракт `FusedSignal`/`FusionRequest`, `FusionClient` Protocol, `HttpFusionClient` и `StubFusionClient`. Реализация — по `ML_LLM_FUSION_SPEC.md` в подпакетах `augur.fusion` (с 0.10.0): ML-слой — `augur.fusion.ml` (skill `ml-training-inference`). Подпакеты подчиняются тому же контракту «Fusion cannot reach execution»; ML/LLM-библиотеки импортируются только внутри `augur.fusion`.
+> `src/augur/fusion/` — **тонкий интерфейсный модуль**: только контракт `FusedSignal`/`FusionRequest`, `FusionClient` Protocol, `HttpFusionClient` и `StubFusionClient`. Реализация — по `ML_LLM_FUSION_SPEC.md` в подпакетах `augur.fusion` (с 0.10.0): ML-слой — `augur.fusion.ml` (skill `ml-training-inference`), LLM-слой — `augur.fusion.llm` (skill `llm-output-validation`), `fuse()` — `augur.fusion.engine`, in-process клиент — `augur.fusion.local.LocalFusionClient`, сборка — `augur.fusion.factory`. Эти подмодули импортируются явно; `HttpFusionClient` пока не реализован. Подпакеты подчиняются тому же контракту «Fusion cannot reach execution»; ML/LLM-библиотеки импортируются только внутри `augur.fusion`.
 
 Контракты `import-linter` (фрагмент):
 
@@ -1801,7 +1801,7 @@ GUI и CLI развиваются параллельно с этапа 3 (мин
 - Risk Gate: полный набор чеков, применимых к крипте.
 - GUI: Dashboard, Positions, Auto-Trading Control (kill switch); CLI: `run`, `backtest`, `signals`, `kill-switch`, `config validate`.
 
-ML- и LLM-этапы реализуются отдельно по `ML_LLM_FUSION_SPEC.md` и подключаются заменой `StubFusionClient` на `HttpFusionClient` (флаг `FUSION__ENABLED=true`, `FUSION__ENDPOINT=...`) без изменений Signal Engine.
+ML- и LLM-этапы реализуются по `ML_LLM_FUSION_SPEC.md` и подключаются без изменений Signal Engine: с 0.10.0 — in-process `LocalFusionClient` (`FUSION__ENABLED=true` без `FUSION__ENDPOINT`); внешний сервис с `HttpFusionClient` (`FUSION__ENDPOINT=...`) — позже.
 
 ---
 

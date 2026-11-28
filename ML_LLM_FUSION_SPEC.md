@@ -855,6 +855,8 @@ WHEN NEW.signal_id          IS NOT OLD.signal_id
 BEGIN SELECT RAISE(ABORT, 'decision_audit row is immutable'); END;
 ```
 
+**Реализация 0.10.0 (миграция `0007_ml_llm`).** К DDL выше добавлены: `ml_models.status_changed_at` (отсчёт дней в staging) и `UNIQUE (version)`; `llm_calls.task` допускает `news_sentiment`; таблица `llm_contexts` (append-only) — агрегированный результат `LLMContextService`, который Fusion читает вместо синхронного вызова LLM (§6.2 п. 2) и по которому работает replay. Шаблоны промптов лежат в пакете (`src/augur/fusion/llm/prompts/<task>/<version>.j2`), их отпечаток (текст + модели + параметры) — в `artifacts(kind='llm_prompt')`.
+
 **Примечания.** `STRICT` требует SQLite ≥ 3.37, частичные индексы — ≥ 3.8; в стандартной сборке Python 3.11+ обычно идёт более новая версия, но её стоит проверить через `sqlite3.sqlite_version`. Записи в `decision_audit` — append-only; допустимы только однократные заполнения `order_id`, `execution_result`, `explanation` (триггеры выше, `VERSIONING.md` §6.1–6.2). `fused_signal_id` равен NULL при `fusion.enabled=false`. `ml_prediction_id` — логическая ссылка на `ml_predictions.id` без `REFERENCES`: таблица создаётся миграцией ML-контура (0.10.0), а FK на несуществующую таблицу в SQLite ломает любой INSERT в дочернюю. Очистка `llm_calls.response_json` старше 90 дней — ежедневный job (метаданные вызова остаются).
 
 Типовой запрос для контроля бюджета:

@@ -655,6 +655,25 @@ def _news_fetchers(settings: Settings) -> list[NewsFetcher] | None:
     return None
 
 
+def _news_scorer(conn: sqlite3.Connection, settings: Settings) -> Any:
+    """`news.scorer=llm` → LLM-скорер Fusion с fallback на rule:v1 (0.10.0); иначе None."""
+    if settings.news.scorer != "llm":
+        return None
+    from augur.fusion.factory import llm_keys
+    from augur.fusion.llm.client import OpenAICompatClient
+    from augur.fusion.llm.news_scorer import LLMNewsScorer
+    from augur.news import RuleBasedScorer
+
+    return LLMNewsScorer(
+        conn,
+        settings.fusion.llm,
+        OpenAICompatClient(),
+        llm_keys(settings),
+        fallback=RuleBasedScorer(settings.news.source_weights),
+        clock=_now_ms,
+    )
+
+
 @news_app.command("fetch")
 def news_fetch(db: str = DbOption) -> None:
     """Один цикл: Finnhub -> нормализация -> дедуп -> rule:v1 -> news -> реакции."""
@@ -662,7 +681,12 @@ def news_fetch(db: str = DbOption) -> None:
     conn = _open_db(db)
     try:
         try:
-            pipeline = build_news_pipeline(conn, settings, fetchers=_news_fetchers(settings))
+            pipeline = build_news_pipeline(
+                conn,
+                settings,
+                fetchers=_news_fetchers(settings),
+                scorer=_news_scorer(conn, settings),
+            )
         except ValueError as e:
             typer.echo(f"ERROR: {e}", err=True)
             raise typer.Exit(code=1) from e
@@ -931,3 +955,275 @@ def gui(
     api = create_app(settings, db_path=db_path, ws_poll_s=poll, live_adapter=_live_adapter)
     typer.echo(f"Augur GUI: http://{host}:{port}/  (token: API_AUTH_TOKEN)")
     uvicorn.run(api, host=host, port=port, log_level="info")
+
+
+# --- ML / LLM / Fusion (0.10.0; ML_LLM_FUSION_SPEC.md §2.4, §3, §5.5) ---------------------
+
+ml_app = typer.Typer(help="ML-модели: обучение, реестр, промоушен, replay.", no_args_is_help=True)
+app.add_typer(ml_app, name="ml")
+llm_app = typer.Typer(help="LLM-контекст: обновление и расход.", no_args_is_help=True)
+app.add_typer(llm_app, name="llm")
+fusion_app = typer.Typer(help="Fusion: воспроизведение решений.", no_args_is_help=True)
+app.add_typer(fusion_app, name="fusion")
+
+SymbolOpt = typer.Option(..., "--symbol", help="Инструмент, напр. BTC/USDT.")
+TimeframeOpt = typer.Option("1h", "--timeframe", help="Таймфрейм баров.")
+
+
+def _ml_settings_or_default() -> Settings:
+    settings = _try_settings()
+    if settings is None:
+        typer.echo("ERROR: settings invalid (API_AUTH_TOKEN и пр. в .env)", err=True)
+        raise typer.Exit(code=1)
+    return settings
+
+
+@ml_app.command("train")
+def ml_train(
+    symbol: str = SymbolOpt,
+    timeframe: str = TimeframeOpt,
+    since: str | None = typer.Option(None, "--since", help="Начало истории, YYYY-MM-DD."),
+    db: str = DbOption,
+) -> None:
+    """Walk-forward + итоговая модель → артефакт lightgbm_v<N> → реестр (candidate)."""
+    from augur.backtest.costs import CostModel
+    from augur.fusion.ml.data import load_bar_arrays
+    from augur.fusion.ml.registry import ModelRegistry, model_name
+    from augur.fusion.ml.train import train_model
+
+    settings = _ml_settings_or_default()
+    cfg = settings.fusion.ml
+    conn = _open_db(db)
+    try:
+        since_ms = _to_ms(_parse_date(since, "--since")) if since else None
+        bars = load_bar_arrays(
+            conn, venue=cfg.venue, symbol=symbol, timeframe=timeframe, since_open=since_ms
+        )
+        if bars is None:
+            typer.echo(f"ERROR: no bars in ohlcv for {cfg.venue} {symbol} {timeframe}", err=True)
+            raise typer.Exit(code=1)
+        registry = ModelRegistry(conn, clock=_now_ms)
+        version = registry.next_version()
+        name = model_name(symbol, timeframe)
+        try:
+            res = train_model(
+                bars,
+                asset=symbol,
+                name=name,
+                version=version,
+                cfg=cfg,
+                min_confidence=settings.fusion.config.ml_min_confidence,
+                costs=CostModel(
+                    commission_pct=settings.execution.commission_pct,
+                    slippage_pct=settings.execution.slippage_pct,
+                ),
+                artifacts_dir=Path(cfg.artifacts_dir),
+            )
+        except (ValueError, ImportError) as e:
+            typer.echo(f"ERROR: {e}", err=True)
+            raise typer.Exit(code=1) from e
+        rec = registry.register(
+            name=name, version=version, artifact_path=res.path, trained_at=_now_ms(), actor=_actor()
+        )
+    finally:
+        conn.close()
+    typer.echo(f"{rec.version} {rec.name} status={rec.status} sha256={rec.artifact_sha256[:12]}")
+    for k, v in res.metrics.items():
+        typer.echo(f"  {k:<14} {v}")
+
+
+@ml_app.command("list")
+def ml_list(db: str = DbOption) -> None:
+    """Модели реестра: версия, имя, статус, ECE и Sharpe walk-forward."""
+    from augur.fusion.ml.registry import ModelRegistry
+
+    conn = _open_db(db)
+    try:
+        recs = ModelRegistry(conn, clock=_now_ms).list()
+    finally:
+        conn.close()
+    if not recs:
+        typer.echo("no models")
+    for r in recs:
+        typer.echo(
+            f"{r.version:<14} {r.name:<28} {r.status:<10} ece={r.metrics.get('ece')} "
+            f"sharpe={r.metrics.get('sharpe')} since={_fmt_ts(r.status_changed_at)} "
+            f"by={r.approved_by or '-'}"
+        )
+
+
+@ml_app.command("promote")
+def ml_promote(
+    version: str = typer.Argument(..., help="lightgbm_v<N>"),
+    to: str = typer.Option(..., "--to", help="staging | production | retired"),
+    approved_by: str = typer.Option(..., "--approved-by", help="Кто подтверждает."),
+    confirm: bool = typer.Option(False, "--confirm", help="Подтвердить смену статуса."),
+    db: str = DbOption,
+) -> None:
+    """Смена статуса модели по §2.4 (автопромоушена нет)."""
+    from augur.fusion.ml.registry import ModelRegistry, PromotionError
+
+    if to not in ("staging", "production", "retired"):
+        typer.echo("ERROR: --to must be staging | production | retired", err=True)
+        raise typer.Exit(code=2)
+    if not confirm:
+        typer.echo("ERROR: add --confirm to change model status", err=True)
+        raise typer.Exit(code=1)
+    settings = _ml_settings_or_default()
+    conn = _open_db(db)
+    try:
+        rec = ModelRegistry(conn, clock=_now_ms).promote(
+            version,
+            to,  # type: ignore[arg-type]
+            approved_by=approved_by,
+            rules=settings.fusion.ml.promotion,
+        )
+    except (PromotionError, KeyError) as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    finally:
+        conn.close()
+    typer.echo(f"{rec.version} → {rec.status} (approved_by={rec.approved_by})")
+
+
+@ml_app.command("replay")
+def ml_replay(prediction_id: str = typer.Argument(...), db: str = DbOption) -> None:
+    """Пересчитать прогноз из `ml_predictions` по model_version и барам."""
+    from augur.fusion.ml.data import load_bar_arrays
+    from augur.fusion.ml.inference import (
+        MLService,
+        PredictionMismatch,
+        load_prediction,
+        replay_prediction,
+    )
+    from augur.fusion.ml.registry import ModelRegistry, ModelUnavailable
+
+    settings = _ml_settings_or_default()
+    cfg = settings.fusion.ml
+    conn = _open_db(db)
+    try:
+        try:
+            stored = load_prediction(conn, prediction_id)
+        except KeyError as e:
+            typer.echo(f"ERROR: prediction not found: {prediction_id}", err=True)
+            raise typer.Exit(code=1) from e
+        registry = ModelRegistry(conn, clock=_now_ms)
+        meta_tf = registry.by_version(stored.model_version).name.rsplit("_", 1)[-1]
+        bars = load_bar_arrays(
+            conn,
+            venue=cfg.venue,
+            symbol=stored.asset,
+            timeframe=meta_tf,
+            until_close=stored.timestamp,
+            limit=cfg.features.window,
+        )
+        if bars is None:
+            typer.echo("ERROR: bars not found", err=True)
+            raise typer.Exit(code=1)
+        try:
+            replay_prediction(
+                conn, MLService(conn, registry, cfg, clock=_now_ms), registry, prediction_id, bars
+            )
+        except (PredictionMismatch, ModelUnavailable) as e:
+            typer.echo(f"MISMATCH: {e}", err=True)
+            raise typer.Exit(code=1) from e
+    finally:
+        conn.close()
+    typer.echo(
+        f"OK {prediction_id}: {stored.direction} {stored.confidence:.4f} {stored.input_hash}"
+    )
+
+
+@llm_app.command("refresh")
+def llm_refresh(
+    symbol: str = SymbolOpt,
+    timeframe: str = TimeframeOpt,
+    event: bool = typer.Option(False, "--event", help="Вызов по событию (бюджет ≥ 80 %)."),
+    db: str = DbOption,
+) -> None:
+    """Один цикл LLM-контекста по активу: новости + сводка цены → llm_contexts."""
+    from augur.fusion.factory import build_llm_context_service
+    from augur.fusion.llm.inputs import load_news_inputs, load_price_summary
+
+    settings = _require_settings()
+    lcfg = settings.fusion.llm
+    conn = _open_db(db)
+    try:
+        now = _now_ms()
+        news = load_news_inputs(
+            conn,
+            asset=symbol,
+            as_of=now,
+            window_h=lcfg.news_window_h,
+            limit=lcfg.max_news,
+            body_chars=lcfg.news_body_chars,
+        )
+        price = load_price_summary(
+            conn,
+            venue=settings.fusion.ml.venue,
+            asset=symbol,
+            timeframe=timeframe,
+            as_of=now,
+            window_h=lcfg.news_window_h,
+        )
+        svc = build_llm_context_service(conn, settings, clock=_now_ms)
+        res = asyncio.run(
+            svc.refresh(symbol, as_of=now, news=news, price=price, event_driven=event)
+        )
+    finally:
+        conn.close()
+    typer.echo(f"{res.status} reason={res.reject_reason or '-'} calls={res.llm_call_ids}")
+    if res.context is not None:
+        c = res.context
+        flags = ", ".join(f"{f.code.value}:{f.severity.value}" for f in c.risk_flags) or "-"
+        typer.echo(
+            f"  context_score={c.context_score:+.3f} confidence={c.confidence:.2f} flags={flags}"
+        )
+
+
+@llm_app.command("usage")
+def llm_usage(db: str = DbOption) -> None:
+    """Расход LLM за текущие сутки UTC по провайдерам (FUSION SPEC §7)."""
+    conn = _open_db(db)
+    try:
+        now = _now_ms()
+        rows = conn.execute(
+            "SELECT provider, task, COUNT(*), COALESCE(SUM(cost_usd), 0), "
+            "COALESCE(AVG(latency_ms), 0), SUM(status <> 'ok') FROM llm_calls "
+            "WHERE created_at >= ? GROUP BY provider, task ORDER BY provider, task",
+            (now - now % 86_400_000,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        typer.echo("no LLM calls today")
+    for p, task, n, usd, avg, bad in rows:
+        typer.echo(f"{p:<12} {task:<15} calls={n} usd={usd:.4f} avg_ms={avg:.0f} not_ok={bad}")
+
+
+@fusion_app.command("replay")
+def fusion_replay(
+    ref_id: str = typer.Argument(..., help="id fused_signal / decision_audit."),
+    as_json: bool = JsonOption,
+    db: str = DbOption,
+) -> None:
+    """`fuse()` на сохранённых входах; расхождение с записанным → код выхода 1."""
+    from augur.fusion.replay import ReplayError, replay_fused
+
+    settings = _ml_settings_or_default()
+    conn = _open_db(db)
+    try:
+        res = replay_fused(conn, ref_id, settings.fusion.config)
+    except ReplayError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    finally:
+        conn.close()
+    if as_json:
+        typer.echo(res.model_dump_json(indent=2))
+    else:
+        typer.echo(f"{'MATCH' if res.match else 'MISMATCH'} {res.fused_signal_id}")
+        for f in res.diffs:
+            typer.echo(f"  {f}: recorded={res.recorded[f]!r} replayed={res.replayed[f]!r}")
+    if not res.match:
+        raise typer.Exit(code=1)
